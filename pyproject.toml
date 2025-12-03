@@ -1,0 +1,37 @@
+[project]
+name = "burve_tools"
+description = "A collection of ComfyUI helper nodes, including Google Gemini 3 Pro API image generation and related utilities."
+version = "1.0.0"
+license = {file = "LICENSE"} 
+# classifiers = [
+#     # For OS-independent nodes (works on all operating systems)
+#     "Operating System :: OS Independent",
+#
+#     # OR for OS-specific nodes, specify the supported systems:
+#     "Operating System :: Microsoft :: Windows",  # Windows specific
+#     "Operating System :: POSIX :: Linux",  # Linux specific
+#     "Operating System :: MacOS",  # macOS specific
+#
+#     # GPU Accelerator support. Pick the ones that are supported by your extension.
+#     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
+#     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
+#     "Environment :: GPU :: Intel Arc",      # Intel Arc support
+#     "Environment :: NPU :: Huawei Ascend",  # Huawei Ascend support
+#     "Environment :: GPU :: Apple Metal",    # Apple Metal support
+# ]
+
+dependencies = ["google-genai", "pillow"]
+
+[project.urls]
+Repository = "https://github.com/Burve/ComfyUI_Burve_Tools"
+#  Used by Comfy Registry https://registry.comfy.org
+Documentation = "https://github.com/Burve/ComfyUI_Burve_Tools/wiki"
+"Bug Tracker" = "https://github.com/Burve/ComfyUI_Burve_Tools/issues"
+
+[tool.comfy]
+PublisherId = "burve"
+DisplayName = "ComfyUI_Burve_Tools"
+Icon = "https://raw.githubusercontent.com/Burve/ComfyUI_Burve_Tools/main/assets/icon.png"
+includes = [] 
+# "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
+

@@ -40,7 +40,7 @@ A helper node to verify your API key configuration.
 1.  Clone this repository into your ComfyUI `custom_nodes` directory:
     ```bash
     cd ComfyUI/custom_nodes
-    git clone https://github.com/yourusername/ComfyUI_Burve_Tools.git
+    git clone https://github.com/Burve/ComfyUI_Burve_Tools.git
     ```
 2.  Install the required dependencies:
     ```bash
