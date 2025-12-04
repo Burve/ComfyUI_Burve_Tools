@@ -1,0 +1,89 @@
+{
+  "version": 1.0,
+  "prompts": [
+    {
+      "id": "fashion_product_collage",
+      "title": "Fashion product collage",
+      "category": "Fashion & Beauty",
+      "system": "Create a fashion product collage on a brown corkboard based on this outfit. Each product and the central model image should be presented as individual photos with distinct white borders, pinned organically and aesthetically to the board with small descriptive labels. Format 16:9."
+    },
+    {
+      "id": "fashion_editorial_grid",
+      "title": "Fashion editorial grid",
+      "category": "Fashion & Beauty",
+      "system": "Create [[V1:9]] stunning fashion shots as if they’re from an award-winning fashion editorial. Use this reference as the brand style but add nuance and variety to the range so they convey a professional design touch. Please generate [[V1:9]] images in a grid format."
+    },
+    {
+      "id": "hairstyle_collage",
+      "title": "Hairstyle collage",
+      "category": "Fashion & Beauty",
+      "system": "Create a grid of [[V1:9]] different hairstyles for this woman. List the name of each hairstyle and the brief history about the hairstyle. They can be from any era."
+    },
+    {
+      "id": "outfit_history",
+      "title": "Outfit history",
+      "category": "Fashion & Beauty",
+      "system": "Create a grid of [[V1:9]] images. In each section, style me according that time period. Start from [[V2:1920's]], List the time period on each image."
+    },
+    {
+      "id": "series_knolling",
+      "title": "Series knolling image",
+      "category": "Pop Culture & Lore",
+      "system": "A knolling image of items from the series [[V1:Breaking Bad]]."
+    },
+    {
+      "id": "drink_recipe_infographic",
+      "title": "Drink recipe infographic",
+      "category": "Food & Drink",
+      "system": "You are the world's best mixologist. Create a hyper-realistic detailed recipe infographic showcasing a single, perfect [[V1:pisco sour]]. Include detailed labels and a fotorealistic image of the final drink."
+    },
+    {
+      "id": "lore_image",
+      "title": "Lore image",
+      "category": "Pop Culture & Lore",
+      "system": "Create an image with a lore behind this image. Include text explaining it."
+    },
+    {
+      "id": "droste_effect",
+      "title": "Droste effect",
+      "category": "Visual Effects & Fun Edits",
+      "system": "Droste effect of [[V1:painter painting himself]]"
+    },
+    {
+      "id": "illustrated_glowing_eyes",
+      "title": "Illustrated glowing eyes",
+      "category": "Visual Effects & Fun Edits",
+      "system": "Add illustrated googly eyes and stick hands on the [[V1:woman]] in an exaggerated comedic pose"
+    },
+    {
+      "id": "dieline_3d_box",
+      "title": "Dieline 3D box",
+      "category": "Packaging & Product",
+      "system": "Assemble the dieline into a perfectly folded 3D box with accurate panel placement, clean edges, and undistorted typography. Preserve all artwork exactly as printed on the dieline. Render the box in a minimal, high-end studio setup on a soft neutral background with gentle diffused lighting, subtle shadows, and no extra props. Show the box upright in a refined ¾ angle. Ultra-realistic detail, true colors, matte paperboard texture, crisp folds, premium editorial aesthetic."
+    },
+    {
+      "id": "dieline_2d_box",
+      "title": "Dieline 2D box",
+      "category": "Packaging & Product",
+      "system": "Deconstruct this 3D product packaging photo into a precise, flattened 2D dieline template. Unfold the box into a complete technical net structure, revealing all panels, including previously hidden dust flaps, tucks, and glue tabs. Eliminate all perspective and lens distortion to create a perfect orthographic top-down view. Retain the exact high-fidelity texture and typography from the original photo but map it accurately onto the flat surface. Superimpose clean, technical die-cut lines (solid) and fold lines (dashed) in a contrasting color. Isolated on a pure white background, shadowless, print-ready production quality"
+    },
+    {
+      "id": "linkedin_career_map",
+      "title": "Linkedin career map",
+      "category": "Career & Infographics",
+      "system": "This is my LinkedIn profile data with extra details. Be creative with my career and imagine my work history in a new imaginative ways. Create my career map in the [[V1:Lord of the rings]] style. Add allusions or metaphors that connect my resume to your chosen theme, so the career map feels coherent. Write all text legibly and clearly. [[V2:My work history]]"
+    },
+    {
+      "id": "character_design_sheet",
+      "title": "Character design sheet",
+      "category": "Character & Design",
+      "system": "Please create a detailed character design sheet of the person in this photo. It will be used in a live-action movie, so be careful not to make it look like anime-style artwork. Be sure to structure it with the following three character elements: - A turnaround (three-view) sheet showing the character from multiple angles - An expression sheet showing basic emotional states such as joy, sadness, anger, surprise, fear, and neutral - A pose sheet showing typical actions, such as the character running, jumping, laughing, and crying. Once it is created, remove the original image of the person."
+    },
+    {
+      "id": "handwritten_notes",
+      "title": "Handwritten notes",
+      "category": "Annotations & Overlays",
+      "system": "Write as many cute handwritten notes and highlights as possible on the photo!"
+    }
+  ]
+}

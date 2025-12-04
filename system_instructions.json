@@ -1,0 +1,15 @@
+{
+  "version": 1.0,
+  "presets": [
+    {
+      "id": "none",
+      "title": "None",
+      "system": ""
+    },
+    {
+      "id": "face_similarity_request",
+      "title": "Face similarity request",
+      "system": "Always use any provided image in the prompt as a reference for the generated picture. If a reference image of a person’s face is attached, incorporate that person’s exact facial features and identity into the generated character’s face. The rest of the image should follow the user’s prompt details, but the character’s face must closely match the reference image. Prioritize faithfully using the reference face in all outputs (unless instructed otherwise)."
+    }
+  ]
+}

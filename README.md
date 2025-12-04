@@ -35,6 +35,35 @@ A helper node to verify your API key configuration.
 *   **Functionality**: Checks if the `GEMINI_API_KEY` environment variable is correctly set and visible to ComfyUI. It displays the status and a masked version of the key.
 *   **Outputs**: `info` (Status message).
 
+### 4. Burve System Instructions
+Selects pre-defined system instructions from a dropdown menu.
+
+*   **Functionality**: Loads system instructions from a JSON file (which auto-updates from GitHub) and outputs the selected instruction text.
+*   **Inputs**:
+    *   `instruction_name`: Select a system instruction preset.
+*   **Outputs**:
+    *   `instruction`: The full text of the selected system instruction.
+
+### 5. Burve Variable Injector
+Defines variables for use in dynamic prompts.
+
+*   **Functionality**: A utility node to create a dictionary of variable values. Accepts up to 14 string inputs.
+*   **Inputs**:
+    *   `V1` through `V14` (Optional): String values for variables.
+*   **Outputs**:
+    *   `variables`: A dictionary of the provided variables.
+
+### 6. Burve Prompt Database
+Loads prompts from a database and injects variables.
+
+*   **Functionality**: Selects a prompt from a JSON database (auto-updating) and replaces placeholders (e.g., `[[name:default]]`) with values from the **Burve Variable Injector**.
+*   **Inputs**:
+    *   `prompt_name`: Select a prompt from the database.
+    *   `variables` (Optional): A dictionary of variables from the **Burve Variable Injector** node.
+*   **Outputs**:
+    *   `compiled_prompt`: The prompt with variables injected.
+    *   `raw_prompt`: The original prompt with placeholders.
+
 ## Installation
 
 1.  Clone this repository into your ComfyUI `custom_nodes` directory:
