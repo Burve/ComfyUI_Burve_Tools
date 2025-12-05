@@ -8,6 +8,7 @@ from google.genai import types
 import json
 import urllib.request
 import ssl
+import hashlib
 
 # --- Auto-update logic for system instructions ---
 INSTRUCTIONS_FILE = os.path.join(os.path.dirname(__file__), "system_instructions.json")
@@ -57,30 +58,36 @@ class BurveGoogleImageGen:
         return {
             "required": {
                 "prompt": ("STRING", {"multiline": True, "default": "A futuristic city"}),
-                "model": (["gemini-3-pro-image-preview", "gemini-2.5-flash-image"], {"default": "gemini-2.5-flash-image"}),
+                "model": (
+                    ["gemini-3-pro-image-preview", "gemini-2.5-flash-image"],
+                    {"default": "gemini-2.5-flash-image"},
+                ),
                 "resolution": (["1K", "2K", "4K"], {"default": "1K"}),
-                "aspect_ratio": (["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "5:4", "4:5", "21:9"], {"default": "1:1"}),
+                "aspect_ratio": (
+                    ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "5:4", "4:5", "21:9"],
+                    {"default": "1:1"},
+                ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "enable_google_search": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "system_instructions": ("STRING", {"multiline": True, "default": ""}),
                 "reference_images": ("IMAGE_LIST",),
-            }
+            },
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
-    RETURN_NAMES = ("image", "thinking_process", "system_messages")
+    # normal images, thinking images, thinking text, system messages
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("image", "thinking_image", "thinking_process", "system_messages")
     FUNCTION = "generate_image"
     CATEGORY = "BurveTools"
 
-        # ---- helper to get API key and build a nice error ----
+    # ---- helper to get API key and build a nice error ----
     def _get_api_key_or_error(self):
         key = os.getenv("GEMINI_API_KEY", "").strip()
         if key:
             return key, None
 
-        # This text will be shown in system_messages if the key is missing
         msg = (
             "Gemini API key not found.\n\n"
             "This node reads your key from the GEMINI_API_KEY environment variable.\n\n"
@@ -95,23 +102,31 @@ class BurveGoogleImageGen:
         )
         return None, msg
 
-    def generate_image(self, prompt, model, resolution, aspect_ratio, seed, enable_google_search, system_instructions="", reference_images=None):
+    def generate_image(
+        self,
+        prompt,
+        model,
+        resolution,
+        aspect_ratio,
+        seed,
+        enable_google_search,
+        system_instructions="",
+        reference_images=None,
+    ):
         # --- API key handling ---
         api_key, key_error = self._get_api_key_or_error()
         if key_error is not None:
-            # Return a tiny blank image + the instructions as system_messages
             blank = torch.zeros((1, 64, 64, 3))
-            return (blank, "", key_error)
+            # normal_image, thinking_image, thinking_process, system_messages
+            return (blank, blank.clone(), "", key_error)
 
         try:
             client = genai.Client(api_key=api_key)
-            
+
             contents = [prompt]
-            
+
             # --- HANDLE REFERENCES AS A LIST ---
             if reference_images is not None:
-                # reference_images is a Python list of tensors
-                # each tensor: [N, H, W, C] (N might be 1)
                 for img_tensor in reference_images:
                     if img_tensor is None:
                         continue
@@ -122,7 +137,6 @@ class BurveGoogleImageGen:
                     if len(contents) - 1 >= 14:  # -1 for the text prompt
                         break
 
-                    # iterate frames in batch
                     b = img_tensor.shape[0]
                     for i in range(b):
                         if len(contents) - 1 >= 14:
@@ -137,31 +151,48 @@ class BurveGoogleImageGen:
             if enable_google_search:
                 tools.append(types.Tool(google_search=types.GoogleSearch()))
 
-            # Configure generation
-            config = types.GenerateContentConfig(
-                response_modalities=['TEXT', 'IMAGE'],
-                image_config=types.ImageConfig(
+            config = None
+
+            if model == "gemini-2.5-flash-image":
+                # Per docs: only aspect_ratio, no image_size, no tools, no thinking_config
+                image_cfg = types.ImageConfig(
+                    aspect_ratio=aspect_ratio,
+                )
+                config = types.GenerateContentConfig(
+                    image_config=image_cfg,
+                    system_instruction=system_instructions or None,
+                    seed=seed % 2147483647 if seed is not None else None,
+                )
+            elif model == "gemini-3-pro-image-preview":
+                # Full config: aspect ratio, resolution, thinking, text+image
+                image_cfg = types.ImageConfig(
                     aspect_ratio=aspect_ratio,
                     image_size=resolution,
-                ),
-                tools=tools if tools else None,
-                system_instruction=system_instructions if system_instructions else None,
-                seed=seed % 2147483647 if seed is not None else None,
-                thinking_config=types.ThinkingConfig(
+                )
+                thinking_cfg = types.ThinkingConfig(
                     include_thoughts=True,
-                    # optional: thinking_budget=1024 or thinking_level="low"/"high" on 3.x models
-                ),
-            )
+                    # optional: thinking_budget / thinking_level
+                )
+                config = types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                    image_config=image_cfg,
+                    tools=tools if tools else None,
+                    system_instruction=system_instructions or None,
+                    seed=seed % 2147483647 if seed is not None else None,
+                    thinking_config=thinking_cfg,
+                )
 
             # Call API
             response = client.models.generate_content(
                 model=model,
                 contents=contents,
-                config=config
+                config=config,
             )
 
-            output_image = None
-            thinking_process = ""
+            normal_images = []    # non-thinking images
+            thinking_images = []  # thinking images (part.thought == True)
+            thought_chunks = []
+            answer_chunks = []
             system_messages = ""
 
             # Prefer the canonical structure from docs
@@ -169,52 +200,93 @@ class BurveGoogleImageGen:
             if candidates:
                 parts = candidates[0].content.parts
             else:
-                # fallback for convenience alias
                 parts = getattr(response, "parts", [])
 
-            thought_chunks = []
-            answer_chunks = []
+            # de-dupe using raw bytes so thought + final identical pair collapses to one
+            seen_hashes = set()
 
             for part in parts:
-                # image data
+                is_thought = getattr(part, "thought", False)
+
+                # ----- image data -----
                 if getattr(part, "inline_data", None):
                     image_bytes = part.inline_data.data
-                    pil_image = Image.open(io.BytesIO(image_bytes))
-                    image_np = np.array(pil_image).astype(np.float32) / 255.0
-                    image_tensor = torch.from_numpy(image_np).unsqueeze(0)
-                    if output_image is None:
-                        output_image = image_tensor
-                    else:
-                        output_image = torch.cat((output_image, image_tensor), dim=0)
 
-                # text data
+                    img_hash = hashlib.sha256(image_bytes).hexdigest()
+                    if img_hash in seen_hashes:
+                        continue
+                    seen_hashes.add(img_hash)
+
+                    pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                    image_np = np.array(pil_image).astype(np.float32) / 255.0
+                    if image_np.ndim == 2:
+                        # grayscale → expand to 3 channels
+                        image_np = np.stack([image_np] * 3, axis=-1)
+
+                    image_tensor = torch.from_numpy(image_np).unsqueeze(0)
+
+                    if is_thought:
+                        thinking_images.append(image_tensor)
+                    else:
+                        normal_images.append(image_tensor)
+
+                # ----- text data -----
                 txt = getattr(part, "text", None)
                 if not txt:
                     continue
 
-                if getattr(part, "thought", False):
-                    # this is the “thinking” summary
+                if is_thought:
                     thought_chunks.append(txt)
                 else:
-                    # this is normal answer text (you can decide where to send it)
                     answer_chunks.append(txt)
+
+            # If there are no normal images but there ARE thinking images,
+            # treat the first thinking image as a normal output as well
+            if not normal_images and thinking_images:
+                normal_images.append(thinking_images[0])
+
+            # Build image batches; ALWAYS return at least 1 image per output
+            if normal_images:
+                normal_image_batch = torch.cat(normal_images, dim=0)
+            else:
+                normal_image_batch = torch.zeros((1, 64, 64, 3))
+                system_messages = "No non-thinking image generated.\n"
+
+            if thinking_images:
+                thinking_image_batch = torch.cat(thinking_images, dim=0)
+            else:
+                # Return a blank placeholder instead of an empty batch,
+                # so SaveImage doesn't crash if connected to this output.
+                thinking_image_batch = torch.zeros((1, 64, 64, 3))
 
             thinking_process = "\n".join(thought_chunks).strip()
             answer_text = "\n".join(answer_chunks).strip()
 
-            if output_image is None:
-                output_image = torch.zeros((1, 64, 64, 3))
-                system_messages = "No image generated.\n"
+            # For 3 Pro Image we expect thought summaries when thinking is enabled
+            if model == "gemini-3-pro-image-preview":
+                if not thinking_process:
+                    thinking_process = "No thought summary returned by the model."
             else:
-                system_messages = answer_text  # or keep this for errors only, up to you
+                # 2.5 doesn't support thinking_config, so usually no thought text
+                if not thinking_process:
+                    thinking_process = ""
 
-            # If absolutely nothing texty came back, at least say that
-            if not thinking_process:
-                thinking_process = "No thought summary returned by the model."
+            if answer_text:
+                if system_messages:
+                    system_messages += "\n" + answer_text
+                else:
+                    system_messages = answer_text
 
-            return (output_image, thinking_process, system_messages)
+            return (
+                normal_image_batch,
+                thinking_image_batch,
+                thinking_process,
+                system_messages,
+            )
 
-        except Exception as e: return (torch.zeros((1, 64, 64, 3)), "", f"Error: {str(e)}")
+        except Exception as e:
+            blank = torch.zeros((1, 64, 64, 3))
+            return (blank, blank.clone(), "", f"Error: {str(e)}")
 
 class BurveImageRefPack:
     @classmethod
