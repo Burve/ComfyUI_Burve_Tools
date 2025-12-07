@@ -1,4 +1,4 @@
-from .nodes import BurveGoogleImageGen, BurveImageRefPack, BurveDebugGeminiKey, BurveSystemInstructions, BurveVariableInjector, BurvePromptDatabase
+from .nodes import BurveGoogleImageGen, BurveImageRefPack, BurveDebugGeminiKey, BurveSystemInstructions, BurveVariableInjector, BurvePromptDatabase, BurveBlindGridSplitter
 
 NODE_CLASS_MAPPINGS = {
     "BurveGoogleImageGen": BurveGoogleImageGen,
@@ -7,6 +7,7 @@ NODE_CLASS_MAPPINGS = {
     "BurveSystemInstructions": BurveSystemInstructions,
     "BurveVariableInjector": BurveVariableInjector,
     "BurvePromptDatabase": BurvePromptDatabase,
+    "BurveBlindGridSplitter": BurveBlindGridSplitter,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -16,6 +17,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BurveSystemInstructions": "Burve System Instructions",
     "BurveVariableInjector": "Burve Variable Injector",
     "BurvePromptDatabase": "Burve Prompt Database",
+    "BurveBlindGridSplitter": "Burve Blind Grid Splitter",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

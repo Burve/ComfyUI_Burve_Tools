@@ -197,10 +197,17 @@ class BurveGoogleImageGen:
 
             # Prefer the canonical structure from docs
             candidates = getattr(response, "candidates", None)
+            parts = []
+
             if candidates:
-                parts = candidates[0].content.parts
+                # Be defensive: candidates may be empty or content/parts may be None
+                first = candidates[0]
+                content = getattr(first, "content", None)
+                if content is not None:
+                    parts = getattr(content, "parts", None) or []
             else:
-                parts = getattr(response, "parts", [])
+                # response.parts might exist but be None, so use "or []"
+                parts = getattr(response, "parts", None) or []
 
             # de-dupe using raw bytes so thought + final identical pair collapses to one
             seen_hashes = set()
@@ -497,12 +504,14 @@ class BurvePromptDatabase:
                 "prompt_name": (names,),
             },
             "optional": {
+                # your variables dict input
                 "variables": ("VARIABLE_DICT",),
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("compiled_prompt", "raw_prompt")
+    # now we have a 3rd output for the plain title
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("compiled_prompt", "raw_prompt", "title")
     FUNCTION = "process_prompt"
     CATEGORY = "BurveTools"
 
@@ -511,28 +520,29 @@ class BurvePromptDatabase:
         prompts = data.get("prompts", [])
 
         raw_prompt = ""
+        raw_title = ""
 
         for p in prompts:
             title = p.get("title", "Unknown")
             category = p.get("category", "Uncategorized")
             label = f"[{category}] {title}"
 
-            # Now we compare against the *label* shown in the dropdown
+            # Compare against the label shown in the dropdown
             if label == prompt_name:
+                # store the plain title for output
+                raw_title = title
                 # In your JSON the field is called "system"
                 raw_prompt = p.get("system") or p.get("prompt", "")
                 break
 
         if not raw_prompt:
-            return ("", "")
+            return ("", "", "")
 
         if variables is None:
             variables = {}
 
-        # Regex to find [[variable_name:default_value]]
-        # Group 1: variable_name
-        # Group 2: default_value
         import re
+        # Regex to find [[variable_name:default_value]]
         pattern = r"\[\[([a-zA-Z_]\w*):([^\]]*)\]\]"
 
         def replace_match(match):
@@ -548,4 +558,83 @@ class BurvePromptDatabase:
 
         compiled_prompt = re.sub(pattern, replace_match, raw_prompt)
 
-        return (compiled_prompt, raw_prompt)
+        # compiled, raw, and the plain title
+        return (compiled_prompt, raw_prompt, raw_title)
+
+class BurveBlindGridSplitter:
+    """
+    Blind grid splitter:
+    - Input: IMAGE (B, H, W, C)
+    - Params: rows, cols
+    - Output: IMAGE batch containing all tiles (B * rows * cols, tile_h, tile_w, C)
+    - No OpenCV, no analysis, just straight slicing.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "rows": ("INT", {"default": 2, "min": 1, "max": 64}),
+                "cols": ("INT", {"default": 2, "min": 1, "max": 64}),
+                # If image size is not perfectly divisible, you can center-crop
+                # the used area instead of from top-left.
+                "center_crop": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("tiles",)
+    FUNCTION = "split"
+    CATEGORY = "BurveTools"
+
+    def split(self, image, rows, cols, center_crop=False):
+        # image: torch tensor (B, H, W, C)
+        b, h, w, c = image.shape
+
+        # Compute tile size from full image size
+        tile_h = h // rows
+        tile_w = w // cols
+
+        # If tiles would be smaller than 1 px, bail out safely.
+        if tile_h < 1 or tile_w < 1:
+            print(
+                f"BurveBlindGridSplitter: image {h}x{w} too small for "
+                f"{rows}x{cols} grid, returning original image."
+            )
+            return (image,)
+
+        used_h = tile_h * rows
+        used_w = tile_w * cols
+
+        # Optionally center-crop the area we actually use
+        if center_crop:
+            top = max((h - used_h) // 2, 0)
+            left = max((w - used_w) // 2, 0)
+        else:
+            top = 0
+            left = 0
+
+        bottom = top + used_h
+        right = left + used_w
+
+        cropped = image[:, top:bottom, left:right, :]
+
+        tiles = []
+        for bi in range(b):
+            for r in range(rows):
+                for col in range(cols):
+                    y0 = r * tile_h
+                    y1 = y0 + tile_h
+                    x0 = col * tile_w
+                    x1 = x0 + tile_w
+                    # Keep batch dim = 1 for each tile so cat works
+                    tile = cropped[bi:bi + 1, y0:y1, x0:x1, :]
+                    tiles.append(tile)
+
+        if not tiles:
+            # Extremely defensive fallback; shouldn't happen.
+            return (image,)
+
+        out = torch.cat(tiles, dim=0)
+        return (out,)

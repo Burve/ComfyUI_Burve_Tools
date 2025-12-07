@@ -63,6 +63,20 @@ Loads prompts from a database and injects variables.
 *   **Outputs**:
     *   `compiled_prompt`: The prompt with variables injected.
     *   `raw_prompt`: The original prompt with placeholders.
+    *   `title`: The title of the selected prompt.
+
+
+### 7. Burve Blind Grid Splitter
+Splits an image into a grid of tiles without content analysis.
+
+*   **Functionality**: Slices an input image into a specified number of rows and columns. Useful for processing large images in chunks.
+*   **Inputs**:
+    *   `image`: The input image to split.
+    *   `rows`: Number of horizontal slices (default: 2).
+    *   `cols`: Number of vertical slices (default: 2).
+    *   `center_crop`: If enabled, centers the grid on the image if dimensions aren't perfectly divisible, otherwise starts from top-left.
+*   **Outputs**:
+    *   `tiles`: A batch of images containing the resulting grid tiles.
 
 ## Installation
 
