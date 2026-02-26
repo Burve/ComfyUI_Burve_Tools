@@ -638,3 +638,96 @@ class BurveBlindGridSplitter:
 
         out = torch.cat(tiles, dim=0)
         return (out,)
+
+
+class BurvePromptSelector14:
+    """
+    Prompt Selector 14:
+    - Stores up to 14 prompt strings
+    - Selects one based on index (1–14)
+    - Always errors if index is out of bounds (not 1-14)
+    - Optional error when selected prompt is empty
+    - Outputs: selected_prompt (STRING), selected_index (INT)
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {}
+        # 14 multiline prompt inputs
+        for i in range(1, 15):
+            required[f"prompt_{i}"] = ("STRING", {"multiline": True, "default": ""})
+
+        required["index"] = ("INT", {"default": 1, "min": 1, "max": 14, "step": 1})
+        required["error_on_empty"] = ("BOOLEAN", {"default": True})
+
+        return {
+            "required": required,
+        }
+
+    RETURN_TYPES = ("STRING", "INT")
+    RETURN_NAMES = ("selected_prompt", "selected_index")
+    FUNCTION = "select"
+    CATEGORY = "BurveTools/Text"
+
+    def _cancel_remaining_queue(self):
+        """
+        Best-effort cancellation of remaining queued runs.
+        Wrapped in try/except to avoid crashing if APIs are unavailable.
+        """
+        # Attempt to interrupt current processing
+        try:
+            import comfy.model_management
+            if hasattr(comfy.model_management, "interrupt_current_processing"):
+                comfy.model_management.interrupt_current_processing()
+        except Exception:
+            pass
+
+        # Attempt to wipe the prompt queue
+        try:
+            import server
+            if hasattr(server, "PromptServer"):
+                ps = server.PromptServer.instance
+                if ps is not None and hasattr(ps, "prompt_queue"):
+                    pq = ps.prompt_queue
+                    if hasattr(pq, "wipe"):
+                        pq.wipe()
+        except Exception:
+            pass
+
+    def select(
+        self,
+        index,
+        error_on_empty,
+        **kwargs,
+    ):
+        # Build prompt dict from kwargs (prompt_1 through prompt_14)
+        prompts = {}
+        for i in range(1, 15):
+            key = f"prompt_{i}"
+            prompts[i] = kwargs.get(key, "")
+
+        # Always error if index is out of bounds (not between 1 and 14)
+        if index < 1 or index > 14:
+            self._cancel_remaining_queue()
+            raise ValueError(
+                f"[BurvePromptSelector14] Index {index} is out of bounds! "
+                f"Must be between 1 and 14."
+            )
+
+        selected_index = index
+
+        # Get the selected prompt
+        selected_prompt = prompts.get(selected_index, "")
+
+        # Check for empty prompt if toggle is enabled
+        if error_on_empty and (not selected_prompt or not selected_prompt.strip()):
+            # Attempt to cancel remaining queue
+            self._cancel_remaining_queue()
+
+            raise ValueError(
+                f"[BurvePromptSelector14] Prompt {selected_index} is empty! "
+                f"Stopping execution. (error_on_empty=True)"
+            )
+
+        return (selected_prompt, selected_index)
+
