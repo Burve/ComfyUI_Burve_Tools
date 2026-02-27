@@ -10,16 +10,22 @@ This is the main node for generating images using Google's Gemini models.
 *   **Functionality**: Generates images based on text prompts, with support for system instructions and reference images.
 *   **Inputs**:
     *   `prompt`: The description of the image you want to generate.
-    *   `model`: Select between `gemini-3-pro-image-preview` and `gemini-2.5-flash-image`.
-    *   `resolution`: Output resolution (1K, 2K, 4K).
-    *   `aspect_ratio`: Desired aspect ratio (e.g., 1:1, 16:9, 9:16).
+    *   `model`: Select between `gemini-3.1-flash-image-preview`, `gemini-3-pro-image-preview`, and `gemini-2.5-flash-image`.
+    *   `resolution`: Output resolution (`0.5K`, `1K`, `2K`, `4K`). (`0.5K` is for 3.1 Flash Image.)
+    *   `aspect_ratio`: Desired aspect ratio. Includes extra 3.1 Flash Image ratios (`1:4`, `4:1`, `1:8`, `8:1`) plus standard ratios.
     *   `seed`: Seed for reproducibility.
-    *   `enable_google_search`: If enabled, allows the model to use Google Search grounding (if supported by the model/API).
+    *   `search_mode`: Preferred search control (`legacy_toggles`, `off`, `web`, `image`, `web+image`).
+    *   `thinking_mode`: Preferred thinking control (`legacy_toggle`, `minimal`, `high`) for `gemini-3.1-flash-image-preview`.
+    *   `(legacy, optional) enable_google_search`: Enables Google Search grounding when supported by the selected model.
+    *   `(legacy, optional) enable_image_search`: Enables Google Image Search grounding for `gemini-3.1-flash-image-preview`.
+    *   `(legacy, optional) enable_thinking_mode`: Legacy toggle for 3.1 Flash Image reasoning intensity (`on` = high, `off` = minimal + hidden thoughts).
+    *   Legacy compatibility: if `search_mode` is `legacy_toggles`, the node uses `(legacy) enable_google_search` + `(legacy) enable_image_search`; if `thinking_mode` is `legacy_toggle`, it uses `(legacy) enable_thinking_mode`.
     *   `system_instructions` (Optional): Advanced instructions to guide the model's behavior.
     *   `reference_images` (Optional): A list of images to use as context/reference for the generation. Use the **Burve Image Ref Pack** node to create this list.
 *   **Outputs**:
     *   `image`: The generated image(s).
-    *   `thinking_process`: The text output from the model, which may include reasoning or descriptions.
+    *   `thinking_image`: Any thought-stage image(s) returned by the model.
+    *   `thinking_process`: Reasoning/thought text (when returned by the model).
     *   `system_messages`: Error messages or status updates (e.g., if the API key is missing).
 
 ### 2. Burve Image Ref Pack

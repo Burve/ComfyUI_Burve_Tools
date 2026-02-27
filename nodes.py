@@ -59,18 +59,31 @@ class BurveGoogleImageGen:
             "required": {
                 "prompt": ("STRING", {"multiline": True, "default": "A futuristic city"}),
                 "model": (
-                    ["gemini-3-pro-image-preview", "gemini-2.5-flash-image"],
+                    ["gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview", "gemini-2.5-flash-image"],
                     {"default": "gemini-2.5-flash-image"},
                 ),
-                "resolution": (["1K", "2K", "4K"], {"default": "1K"}),
+                "resolution": (["0.5K", "1K", "2K", "4K"], {"default": "1K"}),
                 "aspect_ratio": (
-                    ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "5:4", "4:5", "21:9"],
+                    [
+                        "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1",
+                        "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
+                    ],
                     {"default": "1:1"},
                 ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "enable_google_search": ("BOOLEAN", {"default": False}),
+                "search_mode": (
+                    ["legacy_toggles", "off", "web", "image", "web+image"],
+                    {"default": "legacy_toggles"},
+                ),
+                "thinking_mode": (
+                    ["legacy_toggle", "minimal", "high"],
+                    {"default": "legacy_toggle"},
+                ),
             },
             "optional": {
+                "enable_google_search": ("BOOLEAN", {"default": False}),
+                "enable_image_search": ("BOOLEAN", {"default": False}),
+                "enable_thinking_mode": ("BOOLEAN", {"default": True}),
                 "system_instructions": ("STRING", {"multiline": True, "default": ""}),
                 "reference_images": ("IMAGE_LIST",),
             },
@@ -102,6 +115,26 @@ class BurveGoogleImageGen:
         )
         return None, msg
 
+    def _resolve_search_mode(self, search_mode, enable_google_search, enable_image_search):
+        if search_mode == "off":
+            return False, False
+        if search_mode == "web":
+            return True, False
+        if search_mode == "image":
+            return False, True
+        if search_mode == "web+image":
+            return True, True
+        return bool(enable_google_search), bool(enable_image_search)
+
+    def _resolve_thinking_mode(self, thinking_mode, enable_thinking_mode):
+        if thinking_mode == "minimal":
+            return "minimal", False
+        if thinking_mode == "high":
+            return "high", True
+        if enable_thinking_mode:
+            return "high", True
+        return "minimal", False
+
     def generate_image(
         self,
         prompt,
@@ -109,7 +142,11 @@ class BurveGoogleImageGen:
         resolution,
         aspect_ratio,
         seed,
-        enable_google_search,
+        search_mode="legacy_toggles",
+        enable_google_search=False,
+        enable_image_search=False,
+        thinking_mode="legacy_toggle",
+        enable_thinking_mode=True,
         system_instructions="",
         reference_images=None,
     ):
@@ -122,6 +159,82 @@ class BurveGoogleImageGen:
 
         try:
             client = genai.Client(api_key=api_key)
+            preflight_messages = []
+
+            extra_flash31_aspects = {"1:4", "4:1", "1:8", "8:1"}
+
+            requested_web_search, requested_image_search = self._resolve_search_mode(
+                search_mode,
+                enable_google_search,
+                enable_image_search,
+            )
+            flash31_thinking_level, flash31_include_thoughts = self._resolve_thinking_mode(
+                thinking_mode,
+                enable_thinking_mode,
+            )
+
+            legacy_web_search = bool(enable_google_search)
+            legacy_image_search = bool(enable_image_search)
+            if search_mode != "legacy_toggles":
+                if requested_web_search != legacy_web_search or requested_image_search != legacy_image_search:
+                    preflight_messages.append(
+                        "search_mode overrides legacy search toggles."
+                    )
+
+            legacy_thinking_level, legacy_include_thoughts = self._resolve_thinking_mode(
+                "legacy_toggle",
+                enable_thinking_mode,
+            )
+            if thinking_mode != "legacy_toggle":
+                if (
+                    flash31_thinking_level != legacy_thinking_level
+                    or flash31_include_thoughts != legacy_include_thoughts
+                ):
+                    preflight_messages.append(
+                        "thinking_mode overrides enable_thinking_mode toggle."
+                    )
+
+            web_search_enabled = requested_web_search
+            image_search_enabled = requested_image_search
+
+            selected_resolution = resolution
+            selected_aspect_ratio = aspect_ratio
+
+            if model in {"gemini-2.5-flash-image", "gemini-3-pro-image-preview"} and aspect_ratio in extra_flash31_aspects:
+                selected_aspect_ratio = "1:1"
+                preflight_messages.append(
+                    f"Aspect ratio {aspect_ratio} is only supported by gemini-3.1-flash-image-preview. "
+                    "Falling back to 1:1."
+                )
+
+            if model == "gemini-3-pro-image-preview" and resolution == "0.5K":
+                selected_resolution = "1K"
+                preflight_messages.append(
+                    "Resolution 0.5K is only supported by gemini-3.1-flash-image-preview. Falling back to 1K."
+                )
+
+            if model == "gemini-2.5-flash-image" and (web_search_enabled or image_search_enabled):
+                preflight_messages.append(
+                    "Search tools are not used for gemini-2.5-flash-image in this node. Ignoring search settings."
+                )
+                web_search_enabled = False
+                image_search_enabled = False
+
+            if model == "gemini-3-pro-image-preview" and image_search_enabled:
+                preflight_messages.append(
+                    "Image search is only supported by gemini-3.1-flash-image-preview. Ignoring image search setting."
+                )
+                image_search_enabled = False
+
+            if model != "gemini-3.1-flash-image-preview":
+                if thinking_mode != "legacy_toggle":
+                    preflight_messages.append(
+                        "thinking_mode dropdown applies only to gemini-3.1-flash-image-preview in this node."
+                    )
+                elif not enable_thinking_mode:
+                    preflight_messages.append(
+                        "enable_thinking_mode toggle is only used by gemini-3.1-flash-image-preview in this node."
+                    )
 
             contents = [prompt]
 
@@ -148,7 +261,39 @@ class BurveGoogleImageGen:
 
             # Configure tools
             tools = []
-            if enable_google_search:
+            if model == "gemini-3.1-flash-image-preview":
+                search_tools_enabled = web_search_enabled or image_search_enabled
+                if search_tools_enabled:
+                    has_advanced_search_types = all(
+                        hasattr(types, name)
+                        for name in ("SearchTypes", "WebSearch", "ImageSearch")
+                    )
+
+                    if has_advanced_search_types:
+                        search_type_args = {}
+                        if web_search_enabled:
+                            search_type_args["web_search"] = types.WebSearch()
+                        if image_search_enabled:
+                            search_type_args["image_search"] = types.ImageSearch()
+
+                        google_search_cfg = types.GoogleSearch(
+                            search_types=types.SearchTypes(**search_type_args)
+                        )
+                        tools.append(types.Tool(google_search=google_search_cfg))
+                    else:
+                        if image_search_enabled and not web_search_enabled:
+                            preflight_messages.append(
+                                "Current google-genai version does not expose ImageSearch/SearchTypes. "
+                                "Please upgrade google-genai to use image search grounding."
+                            )
+                        else:
+                            tools.append(types.Tool(google_search=types.GoogleSearch()))
+                            if image_search_enabled:
+                                preflight_messages.append(
+                                    "Current google-genai version does not expose ImageSearch/SearchTypes. "
+                                    "Using web search only."
+                                )
+            elif model == "gemini-3-pro-image-preview" and web_search_enabled:
                 tools.append(types.Tool(google_search=types.GoogleSearch()))
 
             config = None
@@ -156,18 +301,36 @@ class BurveGoogleImageGen:
             if model == "gemini-2.5-flash-image":
                 # Per docs: only aspect_ratio, no image_size, no tools, no thinking_config
                 image_cfg = types.ImageConfig(
-                    aspect_ratio=aspect_ratio,
+                    aspect_ratio=selected_aspect_ratio,
                 )
                 config = types.GenerateContentConfig(
                     image_config=image_cfg,
                     system_instruction=system_instructions or None,
                     seed=seed % 2147483647 if seed is not None else None,
                 )
+            elif model == "gemini-3.1-flash-image-preview":
+                # Full config: expanded aspect ratios, optional image search, thinking toggle
+                image_cfg = types.ImageConfig(
+                    aspect_ratio=selected_aspect_ratio,
+                    image_size=selected_resolution,
+                )
+                thinking_cfg = types.ThinkingConfig(
+                    thinking_level=flash31_thinking_level,
+                    include_thoughts=flash31_include_thoughts,
+                )
+                config = types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
+                    image_config=image_cfg,
+                    tools=tools if tools else None,
+                    system_instruction=system_instructions or None,
+                    seed=seed % 2147483647 if seed is not None else None,
+                    thinking_config=thinking_cfg,
+                )
             elif model == "gemini-3-pro-image-preview":
                 # Full config: aspect ratio, resolution, thinking, text+image
                 image_cfg = types.ImageConfig(
-                    aspect_ratio=aspect_ratio,
-                    image_size=resolution,
+                    aspect_ratio=selected_aspect_ratio,
+                    image_size=selected_resolution,
                 )
                 thinking_cfg = types.ThinkingConfig(
                     include_thoughts=True,
@@ -181,6 +344,8 @@ class BurveGoogleImageGen:
                     seed=seed % 2147483647 if seed is not None else None,
                     thinking_config=thinking_cfg,
                 )
+            else:
+                raise ValueError(f"Unsupported model: {model}")
 
             # Call API
             response = client.models.generate_content(
@@ -193,7 +358,7 @@ class BurveGoogleImageGen:
             thinking_images = []  # thinking images (part.thought == True)
             thought_chunks = []
             answer_chunks = []
-            system_messages = ""
+            system_messages = "\n".join(preflight_messages).strip()
 
             # Prefer the canonical structure from docs
             candidates = getattr(response, "candidates", None)
@@ -257,7 +422,10 @@ class BurveGoogleImageGen:
                 normal_image_batch = torch.cat(normal_images, dim=0)
             else:
                 normal_image_batch = torch.zeros((1, 64, 64, 3))
-                system_messages = "No non-thinking image generated.\n"
+                if system_messages:
+                    system_messages += "\nNo non-thinking image generated."
+                else:
+                    system_messages = "No non-thinking image generated."
 
             if thinking_images:
                 thinking_image_batch = torch.cat(thinking_images, dim=0)
@@ -269,12 +437,16 @@ class BurveGoogleImageGen:
             thinking_process = "\n".join(thought_chunks).strip()
             answer_text = "\n".join(answer_chunks).strip()
 
-            # For 3 Pro Image we expect thought summaries when thinking is enabled
-            if model == "gemini-3-pro-image-preview":
+            # For 3 Pro and 3.1 Flash Image we expect thought summaries when thinking output is enabled
+            expects_thought_summary = (
+                model == "gemini-3-pro-image-preview"
+                or (model == "gemini-3.1-flash-image-preview" and flash31_include_thoughts)
+            )
+
+            if expects_thought_summary:
                 if not thinking_process:
                     thinking_process = "No thought summary returned by the model."
             else:
-                # 2.5 doesn't support thinking_config, so usually no thought text
                 if not thinking_process:
                     thinking_process = ""
 
