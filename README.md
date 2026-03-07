@@ -115,12 +115,37 @@ setx GEMINI_API_KEY "YOUR_REAL_KEY_HERE"
 ```
 *After running this, you must close and restart your terminal and ComfyUI for the change to take effect.*
 
-**macOS / Linux:**
-Add the export command to your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`):
+**macOS (ComfyUI launched from Terminal):**
+If you start ComfyUI from Terminal, add the export command to your shell profile. This project reads `GEMINI_API_KEY` from the process environment, and terminal-launched apps inherit that shell environment.
+```bash
+echo 'export GEMINI_API_KEY="YOUR_REAL_KEY_HERE"' >> ~/.zshrc
+source ~/.zshrc
+```
+Then start ComfyUI from that same terminal session, or open a new terminal after reloading your profile and launch ComfyUI there.
+
+**macOS (Standalone ComfyUI launched from Applications / Finder / Launchpad):**
+If you launch the standalone ComfyUI app from Finder, Launchpad, or the Applications folder, do not rely on `~/.zshrc` or `~/.bashrc`. macOS GUI apps do not reliably inherit interactive shell startup files.
+```bash
+launchctl setenv GEMINI_API_KEY "YOUR_REAL_KEY_HERE"
+launchctl getenv GEMINI_API_KEY
+```
+After setting the variable, fully quit ComfyUI and relaunch it from Applications, Finder, or Launchpad.
+
+`launchctl setenv` is appropriate for the current login session. After logout or restart, you may need to set it again unless you configure a persistent `LaunchAgent` or another system-level environment setup.
+
+**Linux:**
+Add the export command to your shell configuration file (for example `~/.bashrc` or `~/.zshrc`):
 ```bash
 export GEMINI_API_KEY="YOUR_REAL_KEY_HERE"
 ```
-Then run `source ~/.bashrc` (or `.zshrc`) and restart ComfyUI.
+Then reload your shell config and restart ComfyUI.
 
 ### Troubleshooting
-If the **Burve Google Image Gen** node reports that the API key is missing, use the **Burve Debug Gemini Key** node to inspect what ComfyUI is seeing. If it shows "GEMINI_API_KEY is NOT set", double-check your environment variable setup and ensure you have restarted the application.
+This project reads only the `GEMINI_API_KEY` process environment variable. If the **Burve Google Image Gen** node reports that the API key is missing, use the **Burve Debug Gemini Key** node to inspect what ComfyUI is seeing.
+
+If the debug node shows `GEMINI_API_KEY is NOT set`:
+
+*   Confirm which launch method you are using.
+*   On macOS standalone builds, verify the variable with `launchctl getenv GEMINI_API_KEY`.
+*   Fully quit and relaunch ComfyUI after changing the environment variable.
+*   Check that the key does not contain accidental whitespace or a trailing newline.
