@@ -10,6 +10,11 @@ import urllib.request
 import ssl
 import hashlib
 
+try:
+    from .character_planner import build_character_plan
+except ImportError:
+    from character_planner import build_character_plan
+
 # --- Auto-update logic for system instructions ---
 INSTRUCTIONS_FILE = os.path.join(os.path.dirname(__file__), "system_instructions.json")
 INSTRUCTIONS_URL = "https://raw.githubusercontent.com/Burve/ComfyUI_Burve_Tools/main/system_instructions.json"
@@ -508,6 +513,257 @@ class BurveImageRefPack:
 
         return (result,)
 
+
+class BurveCharacterPlanner:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "height_cm": ("INT", {"default": 170, "min": 140, "max": 210}),
+                "weight_kg": ("INT", {"default": 58, "min": 35, "max": 140}),
+                "bust_cm": ("INT", {"default": 90, "min": 70, "max": 150}),
+                "underbust_cm": ("INT", {"default": 74, "min": 55, "max": 130}),
+                "waist_cm": ("INT", {"default": 64, "min": 45, "max": 130}),
+                "full_hip_cm": ("INT", {"default": 95, "min": 70, "max": 170}),
+                "body_frame_preset": (
+                    ["balanced", "hourglass", "pear", "athletic"],
+                    {"default": "balanced"},
+                ),
+                "skin_tone": (
+                    ["very_light", "light", "light_medium", "medium", "tan", "deep"],
+                    {"default": "light_medium"},
+                ),
+                "undertone": (
+                    ["cool", "neutral", "warm", "olive"],
+                    {"default": "neutral"},
+                ),
+                "hair_color": (
+                    [
+                        "dark_blonde",
+                        "blonde",
+                        "light_brown",
+                        "brown",
+                        "dark_brown",
+                        "black",
+                        "auburn",
+                        "red",
+                    ],
+                    {"default": "dark_blonde"},
+                ),
+                "hair_length": (
+                    ["bob", "shoulder_length", "long", "very_long"],
+                    {"default": "long"},
+                ),
+                "musculature_tone": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "body_fat": ("FLOAT", {"default": 0.28, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "pose": (
+                    ["neutral_a_pose", "neutral_straight", "contrapposto_soft", "editorial_relaxed"],
+                    {"default": "neutral_a_pose"},
+                ),
+                "outfit_variant": (
+                    ["classic_triangle", "soft_scoop", "narrow_triangle", "halter_contour"],
+                    {"default": "classic_triangle"},
+                ),
+                "outfit_color": (
+                    ["neutral_gray", "soft_taupe", "muted_black"],
+                    {"default": "neutral_gray"},
+                ),
+                "use_face_reference": ("BOOLEAN", {"default": False}),
+                "face_reference_strength": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+            "optional": {
+                "face_reference_image": ("IMAGE",),
+                "extra_reference_images": ("IMAGE_LIST",),
+                "plan_overrides_json": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "IMAGE_LIST", "STRING", "STRING")
+    RETURN_NAMES = ("prompt", "system_instructions", "reference_images", "character_plan_json", "summary")
+    FUNCTION = "build"
+    CATEGORY = "BurveTools/Character"
+
+    @staticmethod
+    def _collect_ui_values(kwargs):
+        return {
+            "height_cm": kwargs["height_cm"],
+            "weight_kg": kwargs["weight_kg"],
+            "bust_cm": kwargs["bust_cm"],
+            "underbust_cm": kwargs["underbust_cm"],
+            "waist_cm": kwargs["waist_cm"],
+            "full_hip_cm": kwargs["full_hip_cm"],
+            "body_frame_preset": kwargs["body_frame_preset"],
+            "skin_tone": kwargs["skin_tone"],
+            "undertone": kwargs["undertone"],
+            "hair_color": kwargs["hair_color"],
+            "hair_length": kwargs["hair_length"],
+            "musculature_tone": kwargs["musculature_tone"],
+            "body_fat": kwargs["body_fat"],
+            "pose": kwargs["pose"],
+            "outfit_variant": kwargs["outfit_variant"],
+            "outfit_color": kwargs["outfit_color"],
+            "use_face_reference": kwargs["use_face_reference"],
+            "face_reference_strength": kwargs["face_reference_strength"],
+        }
+
+    @staticmethod
+    def _normalize_input_types(input_types):
+        if isinstance(input_types, list):
+            if input_types:
+                return input_types[0] or {}
+            return {}
+        return input_types or {}
+
+    @classmethod
+    def _input_is_connected(cls, input_types, name):
+        normalized = cls._normalize_input_types(input_types)
+        return name in normalized
+
+    @staticmethod
+    def _face_reference_present(face_reference_image):
+        return (
+            isinstance(face_reference_image, torch.Tensor)
+            and face_reference_image.ndim >= 4
+            and face_reference_image.shape[0] > 0
+        )
+
+    @staticmethod
+    def _extra_reference_batch_sizes(extra_reference_images):
+        batch_sizes = []
+        if extra_reference_images is None:
+            return batch_sizes
+
+        for index, img_tensor in enumerate(extra_reference_images):
+            if img_tensor is None:
+                continue
+            if not isinstance(img_tensor, torch.Tensor):
+                raise ValueError(f"extra_reference_images[{index}] is not a tensor: {type(img_tensor)}")
+            batch_sizes.append(int(img_tensor.shape[0]))
+
+        return batch_sizes
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, input_types=None, **kwargs):
+        ui_values = cls._collect_ui_values(kwargs)
+        face_reference_present = cls._input_is_connected(input_types, "face_reference_image")
+
+        try:
+            build_character_plan(
+                ui_values=ui_values,
+                plan_overrides_json=kwargs.get("plan_overrides_json", ""),
+                face_reference_present=face_reference_present,
+                extra_reference_batch_sizes=[],
+            )
+        except ValueError as e:
+            return str(e)
+
+        return True
+
+    def _pack_reference_images(self, face_reference_image, extra_reference_images, use_face_reference):
+        packed = []
+
+        if use_face_reference and self._face_reference_present(face_reference_image):
+            packed.append(face_reference_image[:1])
+
+        if extra_reference_images is None:
+            return packed
+
+        for index, img_tensor in enumerate(extra_reference_images):
+            if img_tensor is None:
+                continue
+            if not isinstance(img_tensor, torch.Tensor):
+                raise ValueError(f"extra_reference_images[{index}] is not a tensor: {type(img_tensor)}")
+
+            batch_size = img_tensor.shape[0]
+            for frame_index in range(batch_size):
+                if len(packed) >= 14:
+                    return packed
+                packed.append(img_tensor[frame_index:frame_index + 1])
+
+        return packed
+
+    def build(
+        self,
+        height_cm,
+        weight_kg,
+        bust_cm,
+        underbust_cm,
+        waist_cm,
+        full_hip_cm,
+        body_frame_preset,
+        skin_tone,
+        undertone,
+        hair_color,
+        hair_length,
+        musculature_tone,
+        body_fat,
+        pose,
+        outfit_variant,
+        outfit_color,
+        use_face_reference,
+        face_reference_strength,
+        face_reference_image=None,
+        extra_reference_images=None,
+        plan_overrides_json="",
+    ):
+        ui_values = self._collect_ui_values(
+            {
+                "height_cm": height_cm,
+                "weight_kg": weight_kg,
+                "bust_cm": bust_cm,
+                "underbust_cm": underbust_cm,
+                "waist_cm": waist_cm,
+                "full_hip_cm": full_hip_cm,
+                "body_frame_preset": body_frame_preset,
+                "skin_tone": skin_tone,
+                "undertone": undertone,
+                "hair_color": hair_color,
+                "hair_length": hair_length,
+                "musculature_tone": musculature_tone,
+                "body_fat": body_fat,
+                "pose": pose,
+                "outfit_variant": outfit_variant,
+                "outfit_color": outfit_color,
+                "use_face_reference": use_face_reference,
+                "face_reference_strength": face_reference_strength,
+            }
+        )
+
+        face_reference_present = self._face_reference_present(face_reference_image)
+        extra_batch_sizes = self._extra_reference_batch_sizes(extra_reference_images)
+        result = build_character_plan(
+            ui_values=ui_values,
+            plan_overrides_json=plan_overrides_json,
+            face_reference_present=face_reference_present,
+            extra_reference_batch_sizes=extra_batch_sizes,
+        )
+
+        reference_images = self._pack_reference_images(
+            face_reference_image=face_reference_image,
+            extra_reference_images=extra_reference_images,
+            use_face_reference=result["plan"]["identity"]["face_reference"]["enabled"],
+        )
+
+        summary = result["summary"]
+        if (
+            use_face_reference
+            and isinstance(face_reference_image, torch.Tensor)
+            and face_reference_image.ndim >= 4
+            and face_reference_image.shape[0] > 1
+        ):
+            summary += (
+                "\nNode note: face_reference_image contained multiple frames; only the first frame was used "
+                "as the dedicated face anchor."
+            )
+
+        return (
+            result["prompt"],
+            result["system_instructions"],
+            reference_images,
+            result["character_plan_json"],
+            summary,
+        )
+
 class BurveDebugGeminiKey:
     @classmethod
     def INPUT_TYPES(cls):
@@ -902,4 +1158,3 @@ class BurvePromptSelector14:
             )
 
         return (selected_prompt, selected_index)
-
