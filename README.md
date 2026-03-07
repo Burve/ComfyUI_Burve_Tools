@@ -21,7 +21,7 @@ This is the main node for generating images using Google's Gemini models.
     *   `(legacy, optional) enable_thinking_mode`: Legacy toggle for 3.1 Flash Image reasoning intensity (`on` = high, `off` = minimal + hidden thoughts).
     *   Legacy compatibility: if `search_mode` is `legacy_toggles`, the node uses `(legacy) enable_google_search` + `(legacy) enable_image_search`; if `thinking_mode` is `legacy_toggle`, it uses `(legacy) enable_thinking_mode`.
     *   `system_instructions` (Optional): Advanced instructions to guide the model's behavior.
-    *   `reference_images` (Optional): A list of images to use as context/reference for the generation. Use the **Burve Image Ref Pack** node to create this list.
+    *   `reference_images` (Optional): A list of images to use as context/reference for the generation. Use the **Burve Image Ref Pack** node or the **Burve Character Planner** node to create this list.
 *   **Outputs**:
     *   `image`: The generated image(s).
     *   `thinking_image`: Any thought-stage image(s) returned by the model.
@@ -83,6 +83,42 @@ Splits an image into a grid of tiles without content analysis.
     *   `center_crop`: If enabled, centers the grid on the image if dimensions aren't perfectly divisible, otherwise starts from top-left.
 *   **Outputs**:
     *   `tiles`: A batch of images containing the resulting grid tiles.
+
+### 8. Burve Character Planner
+Builds a reusable base-character prompt bundle for `Burve Google Image Gen`.
+
+*   **Functionality**: Combines curated body/appearance controls with optional raw JSON overrides, emits a generation-ready prompt, emits optional face-lock system instructions, and packs ordered reference images with the dedicated face image first.
+*   **Scope**: v1 is intentionally focused on `adult_female_photorealistic` base-character planning for later outfit swaps and body-shape consistency.
+*   **Inputs**:
+    *   Core body controls: `height_cm`, `weight_kg`, `bust_cm`, `underbust_cm`, `waist_cm`, `full_hip_cm`
+    *   Appearance controls: `body_frame_preset`, `skin_tone`, `undertone`, `hair_color`, `hair_length`, `musculature_tone`, `body_fat`, `pose`
+    *   Basewear controls: `outfit_variant` (`classic_triangle`, `soft_scoop`, `narrow_triangle`, `halter_contour`) and `outfit_color` (`neutral_gray`, `soft_taupe`, `muted_black`)
+    *   Face controls: `use_face_reference`, `face_reference_strength`, and optional `face_reference_image`
+    *   Advanced controls: optional `extra_reference_images` (`IMAGE_LIST`) and optional `plan_overrides_json`
+*   **Outputs**:
+    *   `prompt`: Structured character-planning prompt text for **Burve Google Image Gen**
+    *   `system_instructions`: Blank by default, or a stable face-lock instruction when a dedicated face image is enabled and connected
+    *   `reference_images`: Ordered `IMAGE_LIST` compatible with **Burve Google Image Gen**
+    *   `character_plan_json`: Normalized round-trippable plan JSON
+    *   `summary`: Validation/status output including face-lock state, resolved outfit variant, reference count, and warnings
+*   **Notes**:
+    *   v1 ships with no custom JS, live badges, or `WEB_DIRECTORY` frontend extension.
+    *   Visual feedback is limited to validation errors plus the `summary` output.
+    *   The built-in outfit presets stay non-explicit and intentionally minimal for silhouette readability.
+
+## Recommended Character Workflow
+
+Use this chain when you want a reusable base character with optional face anchoring:
+
+1.  Connect an optional dedicated face image to **Burve Character Planner** `face_reference_image`.
+2.  If you also want extra non-face references, connect them through **Burve Image Ref Pack** into `extra_reference_images`.
+3.  Connect planner outputs directly into **Burve Google Image Gen**:
+    *   `prompt` -> `prompt`
+    *   `system_instructions` -> `system_instructions`
+    *   `reference_images` -> `reference_images`
+4.  Keep using **Burve Google Image Gen** directly for legacy workflows if you do not need the planner.
+
+The planner does not change the public API of **Burve Google Image Gen**. It only prepares compatible inputs for the existing node.
 
 ## Installation
 
