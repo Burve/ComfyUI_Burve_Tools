@@ -11,13 +11,56 @@ import ssl
 import hashlib
 
 try:
-    from .character_planner import build_character_plan
+    from .character_planner import (
+        build_character_plan,
+        CHARACTER_RACE_PIPE_KIND,
+        CHARACTER_RACE_PIPE_VERSION,
+        RACE_TRAIT_KEYS,
+    )
 except ImportError:
-    from character_planner import build_character_plan
+    from character_planner import (
+        build_character_plan,
+        CHARACTER_RACE_PIPE_KIND,
+        CHARACTER_RACE_PIPE_VERSION,
+        RACE_TRAIT_KEYS,
+    )
 
 # --- Auto-update logic for system instructions ---
 INSTRUCTIONS_FILE = os.path.join(os.path.dirname(__file__), "system_instructions.json")
 INSTRUCTIONS_URL = "https://raw.githubusercontent.com/Burve/ComfyUI_Burve_Tools/main/system_instructions.json"
+CHARACTER_GEN_PIPE_KIND = "burve.character_gen_pipe"
+CHARACTER_GEN_PIPE_VERSION = 1
+CHARACTER_PIPE_OVERRIDE_NOTE = (
+    "character_pipe is connected; ignoring direct prompt, system_instructions, and "
+    "reference_images inputs."
+)
+RACE_OPTIONS = [
+    "human",
+    "elf",
+    "dark_elf",
+    "orc",
+    "angel",
+    "demon",
+    "tiefling",
+    "dragonkin",
+    "catfolk",
+    "wolfkin",
+    "satyr",
+    "merfolk",
+    "fairy",
+    "undead",
+]
+RACE_NAME_OPTIONS = ["none"] + RACE_OPTIONS[1:]
+RACE_DETAIL_OPTIONS = {
+    "ears": ["none", "pointed_elf", "long_fae", "finned", "feline", "canine", "bovine", "caprine"],
+    "horns": ["none", "small_curved", "ram", "antlers", "straight_spire", "swept_back", "crown_horns", "broken_horn"],
+    "wings": ["none", "small_feathered", "large_feathered", "bat_leather", "dragon_membrane", "insect_iridescent", "spectral"],
+    "tail": ["none", "feline", "canine", "fox", "bovine", "equine", "reptilian", "draconic", "spade_demon", "mer_tail"],
+    "legs_feet": ["none", "digitigrade_feline", "digitigrade_canine", "cloven_hoof", "bird_talon", "reptilian_claw", "serpentine_lower_body"],
+    "skin_surface": ["none", "light_scales", "heavy_scales", "fur_patches", "full_fur", "bark_texture", "stone_texture", "chitin", "glowing_markings"],
+    "head_features": ["none", "animal_muzzle", "full_animal_head", "avian_beak", "tusks", "fangs", "gills", "third_eye", "crest"],
+    "hands_arms": ["none", "claws", "talons", "webbed", "scaled_hands", "wing_arms"],
+}
 
 def load_instructions():
     if not os.path.exists(INSTRUCTIONS_FILE):
@@ -62,7 +105,7 @@ class BurveGoogleImageGen:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "prompt": ("STRING", {"multiline": True, "default": "A futuristic city"}),
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
                 "model": (
                     ["gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview", "gemini-2.5-flash-image"],
                     {"default": "gemini-2.5-flash-image"},
@@ -91,6 +134,7 @@ class BurveGoogleImageGen:
                 "enable_thinking_mode": ("BOOLEAN", {"default": True}),
                 "system_instructions": ("STRING", {"multiline": True, "default": ""}),
                 "reference_images": ("IMAGE_LIST",),
+                "character_pipe": ("CHARACTER_GEN_PIPE",),
             },
         }
 
@@ -140,6 +184,158 @@ class BurveGoogleImageGen:
             return "high", True
         return "minimal", False
 
+    def _blank_result(self, system_messages):
+        blank = torch.zeros((1, 64, 64, 3))
+        return (blank, blank.clone(), "", system_messages)
+
+    def _is_non_empty_text(self, value):
+        return isinstance(value, str) and bool(value.strip())
+
+    def _has_reference_images(self, reference_images):
+        if reference_images is None:
+            return False
+
+        try:
+            for img_tensor in reference_images:
+                if (
+                    isinstance(img_tensor, torch.Tensor)
+                    and img_tensor.ndim >= 4
+                    and img_tensor.shape[0] > 0
+                ):
+                    return True
+        except TypeError:
+            return False
+
+        return False
+
+    def _normalize_character_pipe(self, character_pipe):
+        if character_pipe is None:
+            return None
+
+        if not isinstance(character_pipe, dict):
+            raise ValueError("Invalid character_pipe: expected a dict payload.")
+
+        if character_pipe.get("kind") != CHARACTER_GEN_PIPE_KIND:
+            raise ValueError("Invalid character_pipe: unexpected kind.")
+
+        if character_pipe.get("version") != CHARACTER_GEN_PIPE_VERSION:
+            raise ValueError("Invalid character_pipe: unsupported version.")
+
+        if "prompt" not in character_pipe:
+            raise ValueError("Invalid character_pipe: missing required key 'prompt'.")
+
+        if not isinstance(character_pipe["prompt"], str):
+            raise ValueError("Invalid character_pipe: prompt must be a string.")
+
+        pipe_system_instructions = character_pipe.get("system_instructions", "")
+        if not isinstance(pipe_system_instructions, str):
+            raise ValueError("Invalid character_pipe: system_instructions must be a string.")
+
+        pipe_character_plan_json = character_pipe.get("character_plan_json", "")
+        if not isinstance(pipe_character_plan_json, str):
+            raise ValueError("Invalid character_pipe: character_plan_json must be a string.")
+
+        pipe_summary = character_pipe.get("summary", "")
+        if not isinstance(pipe_summary, str):
+            raise ValueError("Invalid character_pipe: summary must be a string.")
+
+        pipe_reference_images = character_pipe.get("reference_images")
+        if pipe_reference_images is None:
+            normalized_reference_images = None
+        elif isinstance(pipe_reference_images, tuple):
+            normalized_reference_images = list(pipe_reference_images)
+        elif isinstance(pipe_reference_images, list):
+            normalized_reference_images = pipe_reference_images
+        else:
+            raise ValueError("Invalid character_pipe: reference_images must be a list.")
+
+        return {
+            "kind": CHARACTER_GEN_PIPE_KIND,
+            "version": CHARACTER_GEN_PIPE_VERSION,
+            "prompt": character_pipe["prompt"],
+            "system_instructions": pipe_system_instructions,
+            "reference_images": normalized_reference_images,
+            "character_plan_json": pipe_character_plan_json,
+            "summary": pipe_summary,
+        }
+
+    def _resolve_generation_inputs(
+        self,
+        prompt,
+        system_instructions="",
+        reference_images=None,
+        character_pipe=None,
+    ):
+        normalized_pipe = self._normalize_character_pipe(character_pipe)
+        direct_prompt_present = self._is_non_empty_text(prompt)
+        direct_system_present = self._is_non_empty_text(system_instructions)
+        direct_reference_present = self._has_reference_images(reference_images)
+
+        if normalized_pipe is not None:
+            resolved_prompt = normalized_pipe["prompt"]
+            if not self._is_non_empty_text(resolved_prompt):
+                raise ValueError("Prompt is empty. Provide a prompt or connect character_pipe.")
+
+            resolved_system_instructions = normalized_pipe["system_instructions"]
+            pipe_reference_images = normalized_pipe["reference_images"]
+            if self._has_reference_images(pipe_reference_images):
+                resolved_reference_images = pipe_reference_images
+            else:
+                resolved_reference_images = None
+
+            ignored_direct_inputs = (
+                direct_prompt_present
+                or direct_system_present
+                or direct_reference_present
+            )
+        else:
+            resolved_prompt = prompt
+            if not self._is_non_empty_text(resolved_prompt):
+                raise ValueError("Prompt is empty. Provide a prompt or connect character_pipe.")
+
+            if direct_system_present:
+                resolved_system_instructions = system_instructions
+            else:
+                resolved_system_instructions = ""
+
+            if direct_reference_present:
+                resolved_reference_images = reference_images
+            else:
+                resolved_reference_images = None
+
+            ignored_direct_inputs = False
+
+        return {
+            "prompt": resolved_prompt,
+            "system_instructions": resolved_system_instructions,
+            "reference_images": resolved_reference_images,
+            "character_plan_json": normalized_pipe["character_plan_json"] if normalized_pipe is not None else "",
+            "planner_summary": normalized_pipe["summary"] if normalized_pipe is not None else "",
+            "character_pipe_connected": normalized_pipe is not None,
+            "ignored_direct_inputs": ignored_direct_inputs,
+        }
+
+    def _append_message_block(self, system_messages, block_text):
+        if not self._is_non_empty_text(block_text):
+            return system_messages
+
+        if self._is_non_empty_text(system_messages):
+            return f"{system_messages}\n\n{block_text}"
+        return block_text
+
+    def _append_character_pipe_override_note(self, system_messages, ignored_direct_inputs):
+        if not ignored_direct_inputs:
+            return system_messages
+
+        return self._append_message_block(system_messages, CHARACTER_PIPE_OVERRIDE_NOTE)
+
+    def _append_planner_summary(self, system_messages, planner_summary, character_pipe_connected):
+        if not character_pipe_connected or not self._is_non_empty_text(planner_summary):
+            return system_messages
+
+        planner_block = f"Planner summary:\n{planner_summary}"
+        return self._append_message_block(system_messages, planner_block)
+
     def generate_image(
         self,
         prompt,
@@ -154,13 +350,35 @@ class BurveGoogleImageGen:
         enable_thinking_mode=True,
         system_instructions="",
         reference_images=None,
+        character_pipe=None,
     ):
+        try:
+            resolved_inputs = self._resolve_generation_inputs(
+                prompt=prompt,
+                system_instructions=system_instructions,
+                reference_images=reference_images,
+                character_pipe=character_pipe,
+            )
+        except ValueError as e:
+            return self._blank_result(str(e))
+
+        prompt = resolved_inputs["prompt"]
+        system_instructions = resolved_inputs["system_instructions"]
+        reference_images = resolved_inputs["reference_images"]
+        planner_summary = resolved_inputs["planner_summary"]
+        character_pipe_connected = resolved_inputs["character_pipe_connected"]
+        ignored_direct_inputs = resolved_inputs["ignored_direct_inputs"]
+
         # --- API key handling ---
         api_key, key_error = self._get_api_key_or_error()
         if key_error is not None:
-            blank = torch.zeros((1, 64, 64, 3))
-            # normal_image, thinking_image, thinking_process, system_messages
-            return (blank, blank.clone(), "", key_error)
+            return self._blank_result(
+                self._append_planner_summary(
+                    self._append_character_pipe_override_note(key_error, ignored_direct_inputs),
+                    planner_summary,
+                    character_pipe_connected,
+                )
+            )
 
         try:
             client = genai.Client(api_key=api_key)
@@ -461,6 +679,16 @@ class BurveGoogleImageGen:
                 else:
                     system_messages = answer_text
 
+            system_messages = self._append_character_pipe_override_note(
+                system_messages,
+                ignored_direct_inputs,
+            )
+            system_messages = self._append_planner_summary(
+                system_messages,
+                planner_summary,
+                character_pipe_connected,
+            )
+
             return (
                 normal_image_batch,
                 thinking_image_batch,
@@ -469,8 +697,16 @@ class BurveGoogleImageGen:
             )
 
         except Exception as e:
-            blank = torch.zeros((1, 64, 64, 3))
-            return (blank, blank.clone(), "", f"Error: {str(e)}")
+            return self._blank_result(
+                self._append_planner_summary(
+                    self._append_character_pipe_override_note(
+                        f"Error: {str(e)}",
+                        ignored_direct_inputs,
+                    ),
+                    planner_summary,
+                    character_pipe_connected,
+                )
+            )
 
 class BurveImageRefPack:
     @classmethod
@@ -519,20 +755,36 @@ class BurveCharacterPlanner:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "gender": (
+                    ["female", "male"],
+                    {"default": "female"},
+                ),
+                "age_years": ("INT", {"default": 25, "min": 18, "max": 80}),
+                "race": (
+                    RACE_OPTIONS,
+                    {"default": "human"},
+                ),
+                "custom_race": ("STRING", {"multiline": False, "default": ""}),
                 "height_cm": ("INT", {"default": 170, "min": 140, "max": 210}),
                 "weight_kg": ("INT", {"default": 58, "min": 35, "max": 140}),
                 "bust_cm": ("INT", {"default": 90, "min": 70, "max": 150}),
                 "underbust_cm": ("INT", {"default": 74, "min": 55, "max": 130}),
                 "waist_cm": ("INT", {"default": 64, "min": 45, "max": 130}),
                 "full_hip_cm": ("INT", {"default": 95, "min": 70, "max": 170}),
+                "male_chest_cm": ("INT", {"default": 102, "min": 80, "max": 160}),
                 "body_frame_preset": (
                     ["balanced", "hourglass", "pear", "athletic"],
+                    {"default": "balanced"},
+                ),
+                "male_body_frame_preset": (
+                    ["balanced", "v_taper", "rectangular", "athletic", "stocky"],
                     {"default": "balanced"},
                 ),
                 "skin_tone": (
                     ["very_light", "light", "light_medium", "medium", "tan", "deep"],
                     {"default": "light_medium"},
                 ),
+                "custom_skin_tone": ("STRING", {"multiline": False, "default": ""}),
                 "undertone": (
                     ["cool", "neutral", "warm", "olive"],
                     {"default": "neutral"},
@@ -550,6 +802,7 @@ class BurveCharacterPlanner:
                     ],
                     {"default": "dark_blonde"},
                 ),
+                "custom_hair_color": ("STRING", {"multiline": False, "default": ""}),
                 "hair_length": (
                     ["bob", "shoulder_length", "long", "very_long"],
                     {"default": "long"},
@@ -564,6 +817,10 @@ class BurveCharacterPlanner:
                     ["classic_triangle", "soft_scoop", "narrow_triangle", "halter_contour"],
                     {"default": "classic_triangle"},
                 ),
+                "male_outfit_variant": (
+                    ["classic_brief", "square_cut", "short_boxer", "compression_short"],
+                    {"default": "classic_brief"},
+                ),
                 "outfit_color": (
                     ["neutral_gray", "soft_taupe", "muted_black"],
                     {"default": "neutral_gray"},
@@ -572,35 +829,45 @@ class BurveCharacterPlanner:
                 "face_reference_strength": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
             },
             "optional": {
+                "race_override_pipe": ("CHARACTER_RACE_PIPE",),
                 "face_reference_image": ("IMAGE",),
                 "extra_reference_images": ("IMAGE_LIST",),
                 "plan_overrides_json": ("STRING", {"multiline": True, "default": ""}),
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "IMAGE_LIST", "STRING", "STRING")
-    RETURN_NAMES = ("prompt", "system_instructions", "reference_images", "character_plan_json", "summary")
+    RETURN_TYPES = ("STRING", "STRING", "IMAGE_LIST", "STRING", "STRING", "CHARACTER_GEN_PIPE")
+    RETURN_NAMES = ("prompt", "system_instructions", "reference_images", "character_plan_json", "summary", "character_pipe")
     FUNCTION = "build"
     CATEGORY = "BurveTools/Character"
 
     @staticmethod
     def _collect_ui_values(kwargs):
         return {
+            "gender": kwargs["gender"],
+            "age_years": kwargs["age_years"],
+            "race": kwargs["race"],
+            "custom_race": kwargs["custom_race"],
             "height_cm": kwargs["height_cm"],
             "weight_kg": kwargs["weight_kg"],
             "bust_cm": kwargs["bust_cm"],
             "underbust_cm": kwargs["underbust_cm"],
             "waist_cm": kwargs["waist_cm"],
             "full_hip_cm": kwargs["full_hip_cm"],
+            "male_chest_cm": kwargs["male_chest_cm"],
             "body_frame_preset": kwargs["body_frame_preset"],
+            "male_body_frame_preset": kwargs["male_body_frame_preset"],
             "skin_tone": kwargs["skin_tone"],
+            "custom_skin_tone": kwargs["custom_skin_tone"],
             "undertone": kwargs["undertone"],
             "hair_color": kwargs["hair_color"],
+            "custom_hair_color": kwargs["custom_hair_color"],
             "hair_length": kwargs["hair_length"],
             "musculature_tone": kwargs["musculature_tone"],
             "body_fat": kwargs["body_fat"],
             "pose": kwargs["pose"],
             "outfit_variant": kwargs["outfit_variant"],
+            "male_outfit_variant": kwargs["male_outfit_variant"],
             "outfit_color": kwargs["outfit_color"],
             "use_face_reference": kwargs["use_face_reference"],
             "face_reference_strength": kwargs["face_reference_strength"],
@@ -653,6 +920,7 @@ class BurveCharacterPlanner:
                 plan_overrides_json=kwargs.get("plan_overrides_json", ""),
                 face_reference_present=face_reference_present,
                 extra_reference_batch_sizes=[],
+                race_override_pipe=kwargs.get("race_override_pipe"),
             )
         except ValueError as e:
             return str(e)
@@ -682,47 +950,78 @@ class BurveCharacterPlanner:
 
         return packed
 
+    @staticmethod
+    def _build_character_pipe(result, reference_images, summary):
+        return {
+            "kind": CHARACTER_GEN_PIPE_KIND,
+            "version": CHARACTER_GEN_PIPE_VERSION,
+            "prompt": result["prompt"],
+            "system_instructions": result["system_instructions"],
+            "reference_images": reference_images,
+            "character_plan_json": result["character_plan_json"],
+            "summary": summary,
+        }
+
     def build(
         self,
+        gender,
+        age_years,
+        race,
+        custom_race,
         height_cm,
         weight_kg,
         bust_cm,
         underbust_cm,
         waist_cm,
         full_hip_cm,
+        male_chest_cm,
         body_frame_preset,
+        male_body_frame_preset,
         skin_tone,
+        custom_skin_tone,
         undertone,
         hair_color,
+        custom_hair_color,
         hair_length,
         musculature_tone,
         body_fat,
         pose,
         outfit_variant,
+        male_outfit_variant,
         outfit_color,
         use_face_reference,
         face_reference_strength,
+        race_override_pipe=None,
         face_reference_image=None,
         extra_reference_images=None,
         plan_overrides_json="",
     ):
         ui_values = self._collect_ui_values(
             {
+                "gender": gender,
+                "age_years": age_years,
+                "race": race,
+                "custom_race": custom_race,
                 "height_cm": height_cm,
                 "weight_kg": weight_kg,
                 "bust_cm": bust_cm,
                 "underbust_cm": underbust_cm,
                 "waist_cm": waist_cm,
                 "full_hip_cm": full_hip_cm,
+                "male_chest_cm": male_chest_cm,
                 "body_frame_preset": body_frame_preset,
+                "male_body_frame_preset": male_body_frame_preset,
                 "skin_tone": skin_tone,
+                "custom_skin_tone": custom_skin_tone,
                 "undertone": undertone,
                 "hair_color": hair_color,
+                "custom_hair_color": custom_hair_color,
                 "hair_length": hair_length,
                 "musculature_tone": musculature_tone,
                 "body_fat": body_fat,
                 "pose": pose,
                 "outfit_variant": outfit_variant,
+                "male_outfit_variant": male_outfit_variant,
                 "outfit_color": outfit_color,
                 "use_face_reference": use_face_reference,
                 "face_reference_strength": face_reference_strength,
@@ -736,6 +1035,7 @@ class BurveCharacterPlanner:
             plan_overrides_json=plan_overrides_json,
             face_reference_present=face_reference_present,
             extra_reference_batch_sizes=extra_batch_sizes,
+            race_override_pipe=race_override_pipe,
         )
 
         reference_images = self._pack_reference_images(
@@ -756,13 +1056,139 @@ class BurveCharacterPlanner:
                 "as the dedicated face anchor."
             )
 
+        character_pipe = self._build_character_pipe(
+            result=result,
+            reference_images=reference_images,
+            summary=summary,
+        )
+
         return (
             result["prompt"],
             result["system_instructions"],
             reference_images,
             result["character_plan_json"],
             summary,
+            character_pipe,
         )
+
+
+class BurveCharacterRaceDetails:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "race_name": (
+                    RACE_NAME_OPTIONS,
+                    {"default": "none"},
+                ),
+                "custom_race_name": ("STRING", {"multiline": False, "default": ""}),
+                "ears": (RACE_DETAIL_OPTIONS["ears"], {"default": "none"}),
+                "custom_ears": ("STRING", {"multiline": False, "default": ""}),
+                "horns": (RACE_DETAIL_OPTIONS["horns"], {"default": "none"}),
+                "custom_horns": ("STRING", {"multiline": False, "default": ""}),
+                "wings": (RACE_DETAIL_OPTIONS["wings"], {"default": "none"}),
+                "custom_wings": ("STRING", {"multiline": False, "default": ""}),
+                "tail": (RACE_DETAIL_OPTIONS["tail"], {"default": "none"}),
+                "custom_tail": ("STRING", {"multiline": False, "default": ""}),
+                "legs_feet": (RACE_DETAIL_OPTIONS["legs_feet"], {"default": "none"}),
+                "custom_legs_feet": ("STRING", {"multiline": False, "default": ""}),
+                "skin_surface": (RACE_DETAIL_OPTIONS["skin_surface"], {"default": "none"}),
+                "custom_skin_surface": ("STRING", {"multiline": False, "default": ""}),
+                "head_features": (RACE_DETAIL_OPTIONS["head_features"], {"default": "none"}),
+                "custom_head_features": ("STRING", {"multiline": False, "default": ""}),
+                "hands_arms": (RACE_DETAIL_OPTIONS["hands_arms"], {"default": "none"}),
+                "custom_hands_arms": ("STRING", {"multiline": False, "default": ""}),
+                "extra_notes": ("STRING", {"multiline": True, "default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ("CHARACTER_RACE_PIPE", "STRING", "STRING")
+    RETURN_NAMES = ("race_override_pipe", "race_override_json", "summary")
+    FUNCTION = "build"
+    CATEGORY = "BurveTools/Character"
+
+    @staticmethod
+    def _resolve_text_or_selection(selection, custom_text):
+        custom_value = str(custom_text).strip()
+        if custom_value:
+            return custom_value, True
+        if selection != "none":
+            return selection, False
+        return "", False
+
+    def build(
+        self,
+        race_name,
+        custom_race_name,
+        ears,
+        custom_ears,
+        horns,
+        custom_horns,
+        wings,
+        custom_wings,
+        tail,
+        custom_tail,
+        legs_feet,
+        custom_legs_feet,
+        skin_surface,
+        custom_skin_surface,
+        head_features,
+        custom_head_features,
+        hands_arms,
+        custom_hands_arms,
+        extra_notes,
+    ):
+        resolved_race_name, custom_race_used = self._resolve_text_or_selection(race_name, custom_race_name)
+        trait_inputs = {
+            "ears": (ears, custom_ears),
+            "horns": (horns, custom_horns),
+            "wings": (wings, custom_wings),
+            "tail": (tail, custom_tail),
+            "legs_feet": (legs_feet, custom_legs_feet),
+            "skin_surface": (skin_surface, custom_skin_surface),
+            "head_features": (head_features, custom_head_features),
+            "hands_arms": (hands_arms, custom_hands_arms),
+        }
+
+        traits = {}
+        custom_overrides = []
+        active_traits = []
+        for key in RACE_TRAIT_KEYS:
+            if key == "extra_notes":
+                value = str(extra_notes).strip()
+                traits[key] = value
+                if value:
+                    custom_overrides.append("extra_notes")
+                    active_traits.append("extra_notes")
+                continue
+
+            selected_value, custom_used = self._resolve_text_or_selection(*trait_inputs[key])
+            traits[key] = selected_value
+            if custom_used:
+                custom_overrides.append(key)
+            if selected_value:
+                active_traits.append(f"{key}={selected_value}")
+
+        if custom_race_used:
+            custom_overrides.insert(0, "race_name")
+
+        race_override_pipe = {
+            "kind": CHARACTER_RACE_PIPE_KIND,
+            "version": CHARACTER_RACE_PIPE_VERSION,
+            "race_name": resolved_race_name,
+            "traits": traits,
+            "summary": "",
+        }
+
+        summary_lines = [
+            f"Race name: {resolved_race_name or 'none'}",
+            f"Active traits: {', '.join(active_traits) if active_traits else 'none'}",
+            f"Custom text overrides: {', '.join(custom_overrides) if custom_overrides else 'none'}",
+        ]
+        summary = "\n".join(summary_lines)
+        race_override_pipe["summary"] = summary
+        race_override_json = json.dumps(race_override_pipe, indent=2, ensure_ascii=True)
+        return (race_override_pipe, race_override_json, summary)
 
 class BurveDebugGeminiKey:
     @classmethod

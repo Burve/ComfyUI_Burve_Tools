@@ -17,6 +17,11 @@
         "base": "light_medium",
         "undertone": "neutral",
         "variation": 0.1
+      },
+      "gender": "female",
+      "age_years": 25,
+      "race": {
+        "base": "human"
       }
     },
     "rendering": {
@@ -231,6 +236,17 @@
         "color": "dark_blonde"
       }
     },
+    "fantasy_traits": {
+      "ears": "none",
+      "horns": "none",
+      "wings": "none",
+      "tail": "none",
+      "legs_feet": "none",
+      "skin_surface": "none",
+      "head_features": "none",
+      "hands_arms": "none",
+      "extra_notes": ""
+    },
     "symmetry_and_variation": {
       "body_symmetry": 0.92,
       "natural_variation": 0.12
@@ -244,6 +260,248 @@
       "min_arm_length_ratio": 0.44,
       "max_shoulder_to_hip_ratio": 1.1,
       "min_shoulder_to_hip_ratio": 0.78
+    }
+  },
+  "default_plan_male": {
+    "version": "1.0",
+    "avatar_type": "adult_male_photorealistic",
+    "identity": {
+      "gender": "male",
+      "age_years": 25,
+      "age_group": "adult",
+      "face_reference": {
+        "enabled": false,
+        "source_type": "image",
+        "image_slot": "face_reference_input",
+        "strength": 0.9,
+        "fallback_if_missing": "disabled"
+      },
+      "ethnicity_blend": [],
+      "race": {
+        "base": "human"
+      },
+      "skin_tone": {
+        "base": "light_medium",
+        "undertone": "neutral",
+        "variation": 0.1
+      }
+    },
+    "rendering": {
+      "style": "photorealistic",
+      "body_visibility_priority": "high",
+      "pose": "neutral_a_pose",
+      "camera": {
+        "framing": "full_body",
+        "angle": "eye_level",
+        "lens_mm": 50
+      },
+      "lighting": {
+        "setup": "soft_studio",
+        "shadow_strength": 0.2
+      }
+    },
+    "base_outfit": {
+      "family": "male_underwear",
+      "variant": "classic_brief",
+      "mode": "minimal_non_explicit",
+      "top": {
+        "type": "none"
+      },
+      "bottom": {
+        "type": "briefs",
+        "rise": "mid",
+        "coverage_front": 0.72,
+        "coverage_back": 0.72,
+        "fit": "tight",
+        "material": "matte_stretch",
+        "leg_length": "brief"
+      },
+      "color": "neutral_gray",
+      "seam_visibility": 0.08
+    },
+    "body": {
+      "height_cm": 180,
+      "weight_kg": 78,
+      "frame": {
+        "bone_structure": "medium",
+        "shoulder_breadth": 0.62,
+        "ribcage_size": 0.56,
+        "pelvis_width": 0.52,
+        "overall_proportion_preset": "balanced"
+      },
+      "proportions": {
+        "head_to_body_ratio": 7.6,
+        "torso_length": 0.51,
+        "leg_length": 0.49,
+        "arm_length": 0.51,
+        "inseam_ratio": 0.47,
+        "upper_leg_to_lower_leg_ratio": 0.52,
+        "shoulder_to_hip_ratio": 1.08
+      },
+      "measurements": {
+        "waist_cm": 82,
+        "high_hip_cm": 90,
+        "full_hip_cm": 98,
+        "gluteal_projection_cm": 7
+      },
+      "posture": {
+        "spine_curve": 0.5,
+        "pelvic_tilt": 0.52,
+        "shoulder_roll": 0.1,
+        "knee_hyperextension": 0.05
+      },
+      "musculature": {
+        "overall_tone": 0.42,
+        "upper_body_definition": 0.38,
+        "core_definition": 0.4,
+        "lower_body_definition": 0.44
+      },
+      "soft_tissue": {
+        "overall_body_fat": 0.22,
+        "fat_distribution": {
+          "upper_body": 0.28,
+          "waist": 0.18,
+          "hips": 0.22,
+          "glutes": 0.26,
+          "thighs": 0.24,
+          "arms": 0.22,
+          "calves": 0.16
+        }
+      }
+    },
+    "male_torso": {
+      "measurements": {
+        "chest_cm": 102
+      },
+      "shape": {
+        "pectoral_mass": 0.52,
+        "pectoral_definition": 0.4,
+        "v_taper": 0.42,
+        "lat_width": 0.4
+      }
+    },
+    "waist_and_torso": {
+      "waist_definition": 0.52,
+      "rib_to_waist_taper": 0.44,
+      "waist_to_hip_transition": 0.5,
+      "abdomen": {
+        "flatness": 0.72,
+        "lower_abdomen_softness": 0.16,
+        "oblique_visibility": 0.28
+      },
+      "back": {
+        "lower_back_curve": 0.48,
+        "lat_width": 0.38
+      }
+    },
+    "shoulders_arms_hands": {
+      "shoulders": {
+        "width": 0.62,
+        "slope": 0.42,
+        "deltoid_roundness": 0.34
+      },
+      "upper_arms": {
+        "length_ratio": 0.31,
+        "circumference": 0.28,
+        "softness": 0.14
+      },
+      "forearms": {
+        "length_ratio": 0.27,
+        "taper": 0.36
+      },
+      "hands": {
+        "size": 0.58,
+        "finger_length": 0.54,
+        "finger_taper": 0.42
+      }
+    },
+    "hips_glutes": {
+      "hip_width": 0.54,
+      "iliac_crest_visibility": 0.16,
+      "glutes": {
+        "size": 0.54,
+        "upper_fullness": 0.44,
+        "lower_fullness": 0.5,
+        "projection": 0.54,
+        "side_roundness": 0.44,
+        "glute_fold_definition": 0.24
+      }
+    },
+    "legs": {
+      "stance": {
+        "hip_to_knee_alignment": "neutral",
+        "leg_axis": 0.5,
+        "inner_thigh_gap": 0.12,
+        "knee_spacing": 0.08,
+        "ankle_spacing": 0.1
+      },
+      "upper_legs": {
+        "length_ratio": 0.27,
+        "thigh_volume": 0.52,
+        "inner_thigh_fullness": 0.36,
+        "outer_thigh_curve": 0.48
+      },
+      "lower_legs": {
+        "length_ratio": 0.25,
+        "calf_volume": 0.34,
+        "calf_peak_height": 0.44,
+        "ankle_delicacy": 0.62
+      },
+      "knees": {
+        "size": 0.22,
+        "definition": 0.34
+      }
+    },
+    "feet": {
+      "size": 0.58,
+      "arch_height": 0.38,
+      "toe_length_profile": "balanced"
+    },
+    "skin": {
+      "texture": {
+        "smoothness": 0.78,
+        "pore_visibility": 0.18,
+        "micro_detail": 0.42
+      },
+      "features": {
+        "freckles": 0.0,
+        "moles": 0.05,
+        "stretch_marks": 0.03,
+        "vein_visibility": 0.06
+      }
+    },
+    "hair": {
+      "scalp_hair": {
+        "enabled": true,
+        "length": "long",
+        "density": 0.8,
+        "color": "dark_blonde"
+      }
+    },
+    "fantasy_traits": {
+      "ears": "none",
+      "horns": "none",
+      "wings": "none",
+      "tail": "none",
+      "legs_feet": "none",
+      "skin_surface": "none",
+      "head_features": "none",
+      "hands_arms": "none",
+      "extra_notes": ""
+    },
+    "symmetry_and_variation": {
+      "body_symmetry": 0.92,
+      "natural_variation": 0.1
+    },
+    "constraints": {
+      "prevent_extreme_proportions": true,
+      "maintain_anatomical_plausibility": true,
+      "max_leg_length_ratio": 0.56,
+      "min_leg_length_ratio": 0.44,
+      "max_arm_length_ratio": 0.56,
+      "min_arm_length_ratio": 0.44,
+      "max_shoulder_to_hip_ratio": 1.25,
+      "min_shoulder_to_hip_ratio": 0.82
     }
   },
   "body_frame_presets": {
@@ -409,6 +667,198 @@
       }
     }
   },
+  "male_body_frame_presets": {
+    "balanced": {
+      "body": {
+        "frame": {
+          "bone_structure": "medium",
+          "shoulder_breadth": 0.62,
+          "ribcage_size": 0.56,
+          "pelvis_width": 0.52,
+          "overall_proportion_preset": "balanced"
+        },
+        "proportions": {
+          "shoulder_to_hip_ratio": 1.08
+        },
+        "soft_tissue": {
+          "fat_distribution": {
+            "upper_body": 0.28,
+            "waist": 0.18,
+            "hips": 0.22,
+            "glutes": 0.26,
+            "thighs": 0.24,
+            "arms": 0.22,
+            "calves": 0.16
+          }
+        }
+      },
+      "waist_and_torso": {
+        "waist_definition": 0.52,
+        "rib_to_waist_taper": 0.44,
+        "waist_to_hip_transition": 0.5
+      },
+      "hips_glutes": {
+        "hip_width": 0.54
+      },
+      "shoulders_arms_hands": {
+        "shoulders": {
+          "width": 0.62
+        }
+      }
+    },
+    "v_taper": {
+      "body": {
+        "frame": {
+          "bone_structure": "medium",
+          "shoulder_breadth": 0.68,
+          "ribcage_size": 0.6,
+          "pelvis_width": 0.5,
+          "overall_proportion_preset": "v_taper"
+        },
+        "proportions": {
+          "shoulder_to_hip_ratio": 1.18
+        },
+        "soft_tissue": {
+          "fat_distribution": {
+            "upper_body": 0.3,
+            "waist": 0.17,
+            "hips": 0.2,
+            "glutes": 0.24,
+            "thighs": 0.22,
+            "arms": 0.24,
+            "calves": 0.16
+          }
+        }
+      },
+      "waist_and_torso": {
+        "waist_definition": 0.58,
+        "rib_to_waist_taper": 0.52,
+        "waist_to_hip_transition": 0.46
+      },
+      "hips_glutes": {
+        "hip_width": 0.5
+      },
+      "shoulders_arms_hands": {
+        "shoulders": {
+          "width": 0.68
+        }
+      }
+    },
+    "rectangular": {
+      "body": {
+        "frame": {
+          "bone_structure": "medium",
+          "shoulder_breadth": 0.58,
+          "ribcage_size": 0.55,
+          "pelvis_width": 0.53,
+          "overall_proportion_preset": "rectangular"
+        },
+        "proportions": {
+          "shoulder_to_hip_ratio": 1.02
+        },
+        "soft_tissue": {
+          "fat_distribution": {
+            "upper_body": 0.27,
+            "waist": 0.2,
+            "hips": 0.22,
+            "glutes": 0.24,
+            "thighs": 0.24,
+            "arms": 0.2,
+            "calves": 0.16
+          }
+        }
+      },
+      "waist_and_torso": {
+        "waist_definition": 0.44,
+        "rib_to_waist_taper": 0.36,
+        "waist_to_hip_transition": 0.42
+      },
+      "hips_glutes": {
+        "hip_width": 0.53
+      },
+      "shoulders_arms_hands": {
+        "shoulders": {
+          "width": 0.58
+        }
+      }
+    },
+    "athletic": {
+      "body": {
+        "frame": {
+          "bone_structure": "medium",
+          "shoulder_breadth": 0.64,
+          "ribcage_size": 0.58,
+          "pelvis_width": 0.51,
+          "overall_proportion_preset": "athletic"
+        },
+        "proportions": {
+          "shoulder_to_hip_ratio": 1.14
+        },
+        "soft_tissue": {
+          "fat_distribution": {
+            "upper_body": 0.29,
+            "waist": 0.16,
+            "hips": 0.2,
+            "glutes": 0.25,
+            "thighs": 0.23,
+            "arms": 0.24,
+            "calves": 0.18
+          }
+        }
+      },
+      "waist_and_torso": {
+        "waist_definition": 0.56,
+        "rib_to_waist_taper": 0.48,
+        "waist_to_hip_transition": 0.48
+      },
+      "hips_glutes": {
+        "hip_width": 0.51
+      },
+      "shoulders_arms_hands": {
+        "shoulders": {
+          "width": 0.64
+        }
+      }
+    },
+    "stocky": {
+      "body": {
+        "frame": {
+          "bone_structure": "heavy",
+          "shoulder_breadth": 0.63,
+          "ribcage_size": 0.6,
+          "pelvis_width": 0.56,
+          "overall_proportion_preset": "stocky"
+        },
+        "proportions": {
+          "shoulder_to_hip_ratio": 1.08
+        },
+        "soft_tissue": {
+          "fat_distribution": {
+            "upper_body": 0.3,
+            "waist": 0.22,
+            "hips": 0.24,
+            "glutes": 0.28,
+            "thighs": 0.27,
+            "arms": 0.24,
+            "calves": 0.18
+          }
+        }
+      },
+      "waist_and_torso": {
+        "waist_definition": 0.4,
+        "rib_to_waist_taper": 0.34,
+        "waist_to_hip_transition": 0.44
+      },
+      "hips_glutes": {
+        "hip_width": 0.56
+      },
+      "shoulders_arms_hands": {
+        "shoulders": {
+          "width": 0.63
+        }
+      }
+    }
+  },
   "outfit_variants": {
     "classic_triangle": {
       "family": "triangle_bikini",
@@ -502,6 +952,84 @@
         "coverage_back": 0.46,
         "fit": "tight",
         "material": "matte_stretch"
+      },
+      "color": "neutral_gray",
+      "seam_visibility": 0.08
+    }
+  },
+  "male_outfit_variants": {
+    "classic_brief": {
+      "family": "male_underwear",
+      "variant": "classic_brief",
+      "mode": "minimal_non_explicit",
+      "top": {
+        "type": "none"
+      },
+      "bottom": {
+        "type": "briefs",
+        "rise": "mid",
+        "coverage_front": 0.72,
+        "coverage_back": 0.72,
+        "fit": "tight",
+        "material": "matte_stretch",
+        "leg_length": "brief"
+      },
+      "color": "neutral_gray",
+      "seam_visibility": 0.08
+    },
+    "square_cut": {
+      "family": "male_underwear",
+      "variant": "square_cut",
+      "mode": "minimal_non_explicit",
+      "top": {
+        "type": "none"
+      },
+      "bottom": {
+        "type": "square_cut_briefs",
+        "rise": "mid",
+        "coverage_front": 0.76,
+        "coverage_back": 0.76,
+        "fit": "tight",
+        "material": "matte_stretch",
+        "leg_length": "short"
+      },
+      "color": "neutral_gray",
+      "seam_visibility": 0.08
+    },
+    "short_boxer": {
+      "family": "male_underwear",
+      "variant": "short_boxer",
+      "mode": "minimal_non_explicit",
+      "top": {
+        "type": "none"
+      },
+      "bottom": {
+        "type": "short_boxers",
+        "rise": "mid",
+        "coverage_front": 0.82,
+        "coverage_back": 0.82,
+        "fit": "relaxed",
+        "material": "matte_stretch",
+        "leg_length": "mid_thigh"
+      },
+      "color": "neutral_gray",
+      "seam_visibility": 0.08
+    },
+    "compression_short": {
+      "family": "male_underwear",
+      "variant": "compression_short",
+      "mode": "minimal_non_explicit",
+      "top": {
+        "type": "none"
+      },
+      "bottom": {
+        "type": "compression_shorts",
+        "rise": "mid",
+        "coverage_front": 0.86,
+        "coverage_back": 0.86,
+        "fit": "tight",
+        "material": "matte_stretch",
+        "leg_length": "mid_thigh"
       },
       "color": "neutral_gray",
       "seam_visibility": 0.08

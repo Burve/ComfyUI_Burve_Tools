@@ -1,9 +1,10 @@
-from .nodes import BurveGoogleImageGen, BurveImageRefPack, BurveCharacterPlanner, BurveDebugGeminiKey, BurveSystemInstructions, BurveVariableInjector, BurvePromptDatabase, BurveBlindGridSplitter, BurvePromptSelector14
+from .nodes import BurveGoogleImageGen, BurveImageRefPack, BurveCharacterPlanner, BurveCharacterRaceDetails, BurveDebugGeminiKey, BurveSystemInstructions, BurveVariableInjector, BurvePromptDatabase, BurveBlindGridSplitter, BurvePromptSelector14
 
 NODE_CLASS_MAPPINGS = {
     "BurveGoogleImageGen": BurveGoogleImageGen,
     "BurveImageRefPack": BurveImageRefPack,
     "BurveCharacterPlanner": BurveCharacterPlanner,
+    "BurveCharacterRaceDetails": BurveCharacterRaceDetails,
     "BurveDebugGeminiKey": BurveDebugGeminiKey,
     "BurveSystemInstructions": BurveSystemInstructions,
     "BurveVariableInjector": BurveVariableInjector,
@@ -16,6 +17,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BurveGoogleImageGen": "Burve Google Image Gen",
     "BurveImageRefPack": "Burve Image Reference Pack",
     "BurveCharacterPlanner": "Burve Character Planner",
+    "BurveCharacterRaceDetails": "Burve Character Race Details",
     "BurveDebugGeminiKey": "Burve Debug Gemini Key",
     "BurveSystemInstructions": "Burve System Instructions",
     "BurveVariableInjector": "Burve Variable Injector",
