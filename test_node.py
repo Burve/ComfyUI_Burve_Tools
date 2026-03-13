@@ -6,7 +6,12 @@ import importlib
 import types as pytypes
 from unittest import mock
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(REPO_DIR)
+PACKAGE_NAME = os.path.basename(REPO_DIR)
+
+sys.path.append(REPO_DIR)
+sys.path.append(PARENT_DIR)
 
 
 def install_test_stubs():
@@ -88,8 +93,9 @@ def install_test_stubs():
                 self.__dict__.update(kwargs)
 
         class DummyClient:
-            def __init__(self, api_key=None):
+            def __init__(self, api_key=None, **kwargs):
                 self.api_key = api_key
+                self.kwargs = kwargs
                 self.models = self
 
             def generate_content(self, *args, **kwargs):
@@ -116,10 +122,14 @@ import torch
 
 with mock.patch("urllib.request.urlopen", side_effect=RuntimeError("network disabled in tests")):
     nodes_module = importlib.import_module("nodes")
+    package_module = importlib.import_module(PACKAGE_NAME)
 
 BurveCharacterPlanner = nodes_module.BurveCharacterPlanner
 BurveCharacterRaceDetails = nodes_module.BurveCharacterRaceDetails
 BurveGoogleImageGen = nodes_module.BurveGoogleImageGen
+BurveVertexImageGen = nodes_module.BurveVertexImageGen
+BurveDebugGeminiKey = nodes_module.BurveDebugGeminiKey
+BurveDebugVertexAuth = nodes_module.BurveDebugVertexAuth
 CHARACTER_GEN_PIPE_KIND = nodes_module.CHARACTER_GEN_PIPE_KIND
 CHARACTER_GEN_PIPE_VERSION = nodes_module.CHARACTER_GEN_PIPE_VERSION
 CHARACTER_RACE_PIPE_KIND = nodes_module.CHARACTER_RACE_PIPE_KIND
@@ -564,9 +574,11 @@ class CharacterRaceDetailsNodeTests(unittest.TestCase):
         self.assertIn("Active traits: none", summary)
 
 
-class BurveGoogleImageGenResolverTests(unittest.TestCase):
+class SharedImageGenResolverTestMixin:
+    NodeClass = None
+
     def setUp(self):
-        self.node = BurveGoogleImageGen()
+        self.node = self.NodeClass()
         self.pipe_reference = torch.ones((1, 2, 2, 3))
         self.direct_reference = torch.zeros((1, 2, 2, 3))
         self.character_pipe = {
@@ -578,6 +590,28 @@ class BurveGoogleImageGenResolverTests(unittest.TestCase):
             "character_plan_json": "{\"avatar_type\": \"adult_female_photorealistic\"}",
             "summary": "Gender: female\nFace lock: inactive",
         }
+
+    class _FakeClient:
+        def __init__(self, response):
+            self.response = response
+            self.models = self
+            self.last_call = None
+
+        def generate_content(self, model, contents, config):
+            self.last_call = {
+                "model": model,
+                "contents": contents,
+                "config": config,
+            }
+            return self.response
+
+    @staticmethod
+    def _make_candidate(parts, finish_reason=None, safety_ratings=None):
+        return pytypes.SimpleNamespace(
+            content=pytypes.SimpleNamespace(parts=parts),
+            finish_reason=finish_reason,
+            safety_ratings=safety_ratings,
+        )
 
     def test_resolver_uses_pipe_values_when_direct_inputs_are_blank(self):
         resolved = self.node._resolve_generation_inputs(
@@ -698,8 +732,8 @@ class BurveGoogleImageGenResolverTests(unittest.TestCase):
                 return FakeResponse()
 
         pipe_without_refs = dict(self.character_pipe, reference_images=None)
-        with mock.patch.object(nodes_module.genai, "Client", FakeClient):
-            with mock.patch.object(self.node, "_get_api_key_or_error", return_value=("test-key", None)):
+        with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
+            with mock.patch.object(self.node, "_build_client", return_value=FakeClient("test-key")):
                 image, thinking_image, thinking_process, system_messages = self.node.generate_image(
                     prompt="direct prompt",
                     model="gemini-2.5-flash-image",
@@ -747,8 +781,8 @@ class BurveGoogleImageGenResolverTests(unittest.TestCase):
                 return FakeResponse()
 
         pipe_without_refs = dict(self.character_pipe, reference_images=None)
-        with mock.patch.object(nodes_module.genai, "Client", FakeClient):
-            with mock.patch.object(self.node, "_get_api_key_or_error", return_value=("test-key", None)):
+        with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
+            with mock.patch.object(self.node, "_build_client", return_value=FakeClient("test-key")):
                 _, _, _, system_messages = self.node.generate_image(
                     prompt="",
                     model="gemini-2.5-flash-image",
@@ -767,6 +801,284 @@ class BurveGoogleImageGenResolverTests(unittest.TestCase):
 
         self.assertNotIn("ignoring direct prompt", system_messages)
         self.assertIn("Planner summary:\nGender: female", system_messages)
+
+    def test_gemini_25_requests_text_and_image_modalities(self):
+        response = pytypes.SimpleNamespace(candidates=None, parts=[])
+        fake_client = self._FakeClient(response)
+
+        with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
+            with mock.patch.object(self.node, "_build_client", return_value=fake_client):
+                self.node.generate_image(
+                    prompt="prompt",
+                    model="gemini-2.5-flash-image",
+                    resolution="1K",
+                    aspect_ratio="1:1",
+                    seed=123,
+                    search_mode="off",
+                    enable_google_search=False,
+                    enable_image_search=False,
+                    thinking_mode="legacy_toggle",
+                    enable_thinking_mode=True,
+                    system_instructions="",
+                    reference_images=None,
+                    character_pipe=None,
+                )
+
+        self.assertEqual(fake_client.last_call["config"].response_modalities, ["TEXT", "IMAGE"])
+
+    def test_generate_image_surfaces_text_only_no_image_diagnostics(self):
+        response = pytypes.SimpleNamespace(
+            candidates=[
+                self._make_candidate(
+                    parts=[pytypes.SimpleNamespace(text="Model returned text only.", thought=False)],
+                    finish_reason="STOP",
+                    safety_ratings="safe",
+                )
+            ],
+            prompt_feedback="No blocking feedback.",
+        )
+        fake_client = self._FakeClient(response)
+
+        with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
+            with mock.patch.object(self.node, "_build_client", return_value=fake_client):
+                image, thinking_image, thinking_process, system_messages = self.node.generate_image(
+                    prompt="prompt",
+                    model="gemini-2.5-flash-image",
+                    resolution="1K",
+                    aspect_ratio="1:1",
+                    seed=123,
+                    search_mode="off",
+                    enable_google_search=False,
+                    enable_image_search=False,
+                    thinking_mode="legacy_toggle",
+                    enable_thinking_mode=True,
+                    system_instructions="",
+                    reference_images=None,
+                    character_pipe=None,
+                )
+
+        self.assertTrue(torch.is_tensor(image))
+        self.assertTrue(torch.is_tensor(thinking_image))
+        self.assertEqual(thinking_process, "")
+        self.assertIn("Model returned text only.", system_messages)
+        self.assertIn("No non-thinking image generated.", system_messages)
+        self.assertIn("The request completed, but no usable image part was found in the response.", system_messages)
+        self.assertIn("Text response was returned without an image.", system_messages)
+        self.assertIn("Finish reason: STOP", system_messages)
+        self.assertIn("Candidate feedback: safe", system_messages)
+        self.assertIn("Prompt feedback: No blocking feedback.", system_messages)
+
+    def test_generate_image_promotes_thinking_image_when_no_normal_image_exists(self):
+        thought_image_bytes = b"thought-image"
+        response = pytypes.SimpleNamespace(
+            candidates=[
+                self._make_candidate(
+                    parts=[
+                        pytypes.SimpleNamespace(
+                            inline_data=pytypes.SimpleNamespace(data=thought_image_bytes),
+                            thought=True,
+                            text=None,
+                        )
+                    ],
+                    finish_reason="STOP",
+                )
+            ],
+            prompt_feedback=None,
+        )
+        fake_client = self._FakeClient(response)
+        fake_image = mock.Mock()
+        fake_image.convert.return_value = fake_image
+        fake_array = mock.Mock()
+        fake_array.astype.return_value = fake_array
+        fake_array.ndim = 3
+        tensor = torch.ones((2, 2, 3))
+
+        with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
+            with mock.patch.object(self.node, "_build_client", return_value=fake_client):
+                with mock.patch.object(nodes_module.Image, "open", return_value=fake_image):
+                    with mock.patch.object(nodes_module.np, "array", return_value=fake_array, create=True):
+                        with mock.patch.object(nodes_module.torch, "from_numpy", return_value=tensor):
+                            image, thinking_image, _, system_messages = self.node.generate_image(
+                                prompt="prompt",
+                                model="gemini-2.5-flash-image",
+                                resolution="1K",
+                                aspect_ratio="1:1",
+                                seed=123,
+                                search_mode="off",
+                                enable_google_search=False,
+                                enable_image_search=False,
+                                thinking_mode="legacy_toggle",
+                                enable_thinking_mode=True,
+                                system_instructions="",
+                                reference_images=None,
+                                character_pipe=None,
+                            )
+
+        self.assertTrue(torch.is_tensor(image))
+        self.assertTrue(torch.is_tensor(thinking_image))
+        self.assertNotIn("No non-thinking image generated.", system_messages)
+
+
+class BurveGoogleImageGenResolverTests(SharedImageGenResolverTestMixin, unittest.TestCase):
+    NodeClass = BurveGoogleImageGen
+
+
+class BurveVertexImageGenResolverTests(SharedImageGenResolverTestMixin, unittest.TestCase):
+    NodeClass = BurveVertexImageGen
+
+
+class BurveImageGenAuthTests(unittest.TestCase):
+    def test_google_node_builds_aistudio_client_with_api_key(self):
+        node = BurveGoogleImageGen()
+
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=False):
+            with mock.patch.object(nodes_module.genai, "Client") as mock_client:
+                node._build_client()
+
+        mock_client.assert_called_once_with(api_key="test-key")
+
+    def test_vertex_node_builds_vertex_client_with_project_and_location(self):
+        node = BurveVertexImageGen()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GOOGLE_CLOUD_PROJECT": "demo-project",
+                "GOOGLE_CLOUD_LOCATION": "us-central1",
+            },
+            clear=False,
+        ):
+            with mock.patch.object(nodes_module.genai, "Client") as mock_client:
+                node._build_client()
+
+        mock_client.assert_called_once_with(
+            vertexai=True,
+            project="demo-project",
+            location="us-central1",
+        )
+
+    def test_google_node_missing_auth_mentions_gemini_key_only(self):
+        node = BurveGoogleImageGen()
+
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}, clear=False):
+            error = node._get_provider_auth_error()
+
+        self.assertIn("GEMINI_API_KEY", error)
+        self.assertNotIn("GOOGLE_CLOUD_PROJECT", error)
+        self.assertNotIn("GOOGLE_CLOUD_LOCATION", error)
+
+    def test_vertex_node_missing_auth_mentions_vertex_setup_not_gemini_key_setup(self):
+        node = BurveVertexImageGen()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GOOGLE_CLOUD_PROJECT": "",
+                "GOOGLE_CLOUD_LOCATION": "",
+                "GEMINI_API_KEY": "should-not-matter",
+            },
+            clear=False,
+        ):
+            error = node._get_provider_auth_error()
+
+        self.assertIn("ignores GEMINI_API_KEY", error)
+        self.assertIn("GOOGLE_CLOUD_PROJECT", error)
+        self.assertIn("GOOGLE_CLOUD_LOCATION", error)
+        self.assertIn("gcloud auth application-default login", error)
+        self.assertNotIn("setx GEMINI_API_KEY", error)
+
+    def test_vertex_node_explains_that_credentials_do_not_replace_project_and_location(self):
+        node = BurveVertexImageGen()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/vertex.json",
+                "GOOGLE_CLOUD_PROJECT": "",
+                "GOOGLE_CLOUD_LOCATION": "",
+                "GEMINI_API_KEY": "should-be-ignored",
+            },
+            clear=False,
+        ):
+            error = node._get_provider_auth_error()
+
+        self.assertIn("ignores GEMINI_API_KEY", error)
+        self.assertIn("GOOGLE_APPLICATION_CREDENTIALS or ADC authenticates you", error)
+        self.assertIn("does not replace GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION", error)
+        self.assertIn("Credentials alone do not supply the required project and region", error)
+        self.assertIn("Missing required environment variables: GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION", error)
+
+
+class BurveDebugNodeTests(unittest.TestCase):
+    def test_debug_gemini_key_reports_presence(self):
+        node = BurveDebugGeminiKey()
+
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "abcd1234efgh"}, clear=False):
+            info, = node.run()
+
+        self.assertIn("GEMINI_API_KEY detected inside ComfyUI", info)
+        self.assertIn("length = 12", info)
+        self.assertIn("start  = abcd", info)
+        self.assertIn("end    = efgh", info)
+
+    def test_debug_vertex_auth_reports_env_state(self):
+        node = BurveDebugVertexAuth()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GOOGLE_CLOUD_PROJECT": "demo-project",
+                "GOOGLE_CLOUD_LOCATION": "europe-west4",
+                "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/vertex.json",
+            },
+            clear=False,
+        ):
+            info, = node.run()
+
+        self.assertIn("GOOGLE_CLOUD_PROJECT present: yes", info)
+        self.assertIn("GOOGLE_CLOUD_LOCATION present: yes", info)
+        self.assertIn("GOOGLE_APPLICATION_CREDENTIALS present: yes", info)
+        self.assertIn("project = demo-project", info)
+        self.assertIn("location = europe-west4", info)
+        self.assertIn("credentials_path = /tmp/vertex.json", info)
+        self.assertIn("gcloud auth application-default login", info)
+
+    def test_debug_vertex_auth_explains_credentials_do_not_complete_config(self):
+        node = BurveDebugVertexAuth()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GOOGLE_CLOUD_PROJECT": "",
+                "GOOGLE_CLOUD_LOCATION": "",
+                "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/vertex.json",
+            },
+            clear=False,
+        ):
+            info, = node.run()
+
+        self.assertIn("GOOGLE_APPLICATION_CREDENTIALS present: yes", info)
+        self.assertIn("Authentication configured: yes", info)
+        self.assertIn("Credentials authenticate the request.", info)
+        self.assertIn("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION are still required by this node.", info)
+        self.assertIn("does not mean the node is fully configured", info)
+        self.assertIn("Missing required config: GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION", info)
+
+
+class NodeRegistrationTests(unittest.TestCase):
+    def test_package_exports_both_image_gen_nodes(self):
+        self.assertEqual(package_module.NODE_CLASS_MAPPINGS["BurveGoogleImageGen"].__name__, BurveGoogleImageGen.__name__)
+        self.assertEqual(package_module.NODE_CLASS_MAPPINGS["BurveVertexImageGen"].__name__, BurveVertexImageGen.__name__)
+        self.assertEqual(
+            package_module.NODE_DISPLAY_NAME_MAPPINGS["BurveVertexImageGen"],
+            "Burve Google Image Gen (Vertex AI)",
+        )
+
+    def test_package_exports_vertex_debug_node(self):
+        self.assertEqual(
+            package_module.NODE_CLASS_MAPPINGS["BurveDebugVertexAuth"].__name__,
+            BurveDebugVertexAuth.__name__,
+        )
 
 
 if __name__ == "__main__":

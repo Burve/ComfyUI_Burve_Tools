@@ -100,7 +100,9 @@ def update_instructions():
 # Run update on module load
 update_instructions()
 
-class BurveGoogleImageGen:
+class BurveGoogleImageGenBase:
+    PROVIDER_ID = "base"
+
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -144,25 +146,11 @@ class BurveGoogleImageGen:
     FUNCTION = "generate_image"
     CATEGORY = "BurveTools"
 
-    # ---- helper to get API key and build a nice error ----
-    def _get_api_key_or_error(self):
-        key = os.getenv("GEMINI_API_KEY", "").strip()
-        if key:
-            return key, None
+    def _get_provider_auth_error(self):
+        raise NotImplementedError
 
-        msg = (
-            "Gemini API key not found.\n\n"
-            "This node reads your key from the GEMINI_API_KEY environment variable.\n\n"
-            "Set it like this and then restart ComfyUI:\n\n"
-            "Windows (PowerShell):\n"
-            "  setx GEMINI_API_KEY \"YOUR_REAL_KEY_HERE\"\n"
-            "  # Then close and reopen your terminal / ComfyUI\n\n"
-            "macOS / Linux (bash / zsh):\n"
-            "  export GEMINI_API_KEY=\"YOUR_REAL_KEY_HERE\"\n"
-            "  # If you want it permanent, add that line to ~/.bashrc or ~/.zshrc\n\n"
-            "After setting GEMINI_API_KEY and restarting ComfyUI, run this node again."
-        )
-        return None, msg
+    def _build_client(self):
+        raise NotImplementedError
 
     def _resolve_search_mode(self, search_mode, enable_google_search, enable_image_search):
         if search_mode == "off":
@@ -336,6 +324,42 @@ class BurveGoogleImageGen:
         planner_block = f"Planner summary:\n{planner_summary}"
         return self._append_message_block(system_messages, planner_block)
 
+    def _stringify_response_detail(self, value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+
+        name = getattr(value, "name", None)
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+
+        text = str(value).strip()
+        if text in {"", "None"}:
+            return ""
+        return text
+
+    def _collect_response_diagnostics(self, response, candidate):
+        diagnostics = []
+
+        finish_reason = self._stringify_response_detail(
+            getattr(candidate, "finish_reason", None) if candidate is not None else None
+        )
+        if finish_reason:
+            diagnostics.append(f"Finish reason: {finish_reason}")
+
+        candidate_feedback = self._stringify_response_detail(
+            getattr(candidate, "safety_ratings", None) if candidate is not None else None
+        )
+        if candidate_feedback:
+            diagnostics.append(f"Candidate feedback: {candidate_feedback}")
+
+        prompt_feedback = self._stringify_response_detail(getattr(response, "prompt_feedback", None))
+        if prompt_feedback:
+            diagnostics.append(f"Prompt feedback: {prompt_feedback}")
+
+        return diagnostics
+
     def generate_image(
         self,
         prompt,
@@ -369,19 +393,18 @@ class BurveGoogleImageGen:
         character_pipe_connected = resolved_inputs["character_pipe_connected"]
         ignored_direct_inputs = resolved_inputs["ignored_direct_inputs"]
 
-        # --- API key handling ---
-        api_key, key_error = self._get_api_key_or_error()
-        if key_error is not None:
+        auth_error = self._get_provider_auth_error()
+        if auth_error is not None:
             return self._blank_result(
                 self._append_planner_summary(
-                    self._append_character_pipe_override_note(key_error, ignored_direct_inputs),
+                    self._append_character_pipe_override_note(auth_error, ignored_direct_inputs),
                     planner_summary,
                     character_pipe_connected,
                 )
             )
 
         try:
-            client = genai.Client(api_key=api_key)
+            client = self._build_client()
             preflight_messages = []
 
             extra_flash31_aspects = {"1:4", "4:1", "1:8", "8:1"}
@@ -522,11 +545,12 @@ class BurveGoogleImageGen:
             config = None
 
             if model == "gemini-2.5-flash-image":
-                # Per docs: only aspect_ratio, no image_size, no tools, no thinking_config
+                # Request image output explicitly while keeping the config otherwise minimal.
                 image_cfg = types.ImageConfig(
                     aspect_ratio=selected_aspect_ratio,
                 )
                 config = types.GenerateContentConfig(
+                    response_modalities=["TEXT", "IMAGE"],
                     image_config=image_cfg,
                     system_instruction=system_instructions or None,
                     seed=seed % 2147483647 if seed is not None else None,
@@ -586,11 +610,12 @@ class BurveGoogleImageGen:
             # Prefer the canonical structure from docs
             candidates = getattr(response, "candidates", None)
             parts = []
+            first_candidate = None
 
             if candidates:
                 # Be defensive: candidates may be empty or content/parts may be None
-                first = candidates[0]
-                content = getattr(first, "content", None)
+                first_candidate = candidates[0]
+                content = getattr(first_candidate, "content", None)
                 if content is not None:
                     parts = getattr(content, "parts", None) or []
             else:
@@ -645,10 +670,10 @@ class BurveGoogleImageGen:
                 normal_image_batch = torch.cat(normal_images, dim=0)
             else:
                 normal_image_batch = torch.zeros((1, 64, 64, 3))
-                if system_messages:
-                    system_messages += "\nNo non-thinking image generated."
-                else:
-                    system_messages = "No non-thinking image generated."
+                no_image_messages = [
+                    "No non-thinking image generated.",
+                    "The request completed, but no usable image part was found in the response.",
+                ]
 
             if thinking_images:
                 thinking_image_batch = torch.cat(thinking_images, dim=0)
@@ -679,6 +704,16 @@ class BurveGoogleImageGen:
                 else:
                     system_messages = answer_text
 
+            if not normal_images:
+                if answer_text:
+                    no_image_messages.append("Text response was returned without an image.")
+                no_image_messages.extend(self._collect_response_diagnostics(response, first_candidate))
+                no_image_block = "\n".join(no_image_messages)
+                if system_messages:
+                    system_messages += "\n" + no_image_block
+                else:
+                    system_messages = no_image_block
+
             system_messages = self._append_character_pipe_override_note(
                 system_messages,
                 ignored_direct_inputs,
@@ -707,6 +742,78 @@ class BurveGoogleImageGen:
                     character_pipe_connected,
                 )
             )
+
+
+class BurveGoogleImageGen(BurveGoogleImageGenBase):
+    PROVIDER_ID = "aistudio"
+
+    def _get_provider_auth_error(self):
+        key = os.getenv("GEMINI_API_KEY", "").strip()
+        if key:
+            return None
+
+        return (
+            "Gemini API key not found.\n\n"
+            "This node reads your key from the GEMINI_API_KEY environment variable.\n\n"
+            "Set it like this and then restart ComfyUI:\n\n"
+            "Windows (PowerShell):\n"
+            "  setx GEMINI_API_KEY \"YOUR_REAL_KEY_HERE\"\n"
+            "  # Then close and reopen your terminal / ComfyUI\n\n"
+            "macOS / Linux (bash / zsh):\n"
+            "  export GEMINI_API_KEY=\"YOUR_REAL_KEY_HERE\"\n"
+            "  # If you want it permanent, add that line to ~/.bashrc or ~/.zshrc\n\n"
+            "After setting GEMINI_API_KEY and restarting ComfyUI, run this node again."
+        )
+
+    def _build_client(self):
+        return genai.Client(api_key=os.getenv("GEMINI_API_KEY", "").strip())
+
+
+class BurveVertexImageGen(BurveGoogleImageGenBase):
+    PROVIDER_ID = "vertex"
+
+    def _get_vertex_project(self):
+        return os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+
+    def _get_vertex_location(self):
+        return os.getenv("GOOGLE_CLOUD_LOCATION", "").strip()
+
+    def _get_provider_auth_error(self):
+        project = self._get_vertex_project()
+        location = self._get_vertex_location()
+        missing = []
+        if not project:
+            missing.append("GOOGLE_CLOUD_PROJECT")
+        if not location:
+            missing.append("GOOGLE_CLOUD_LOCATION")
+
+        if not missing:
+            return None
+
+        missing_text = ", ".join(missing)
+        return (
+            "Vertex AI configuration is incomplete.\n\n"
+            "This node ignores GEMINI_API_KEY.\n"
+            "GOOGLE_APPLICATION_CREDENTIALS or ADC authenticates you, but it does not replace "
+            "GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION.\n"
+            "Credentials alone do not supply the required project and region for this node.\n\n"
+            f"Missing required environment variables: {missing_text}\n\n"
+            "Example setup:\n"
+            "  export GOOGLE_CLOUD_PROJECT=\"your-gcp-project-id\"\n"
+            "  export GOOGLE_CLOUD_LOCATION=\"us-central1\"\n\n"
+            "Authentication:\n"
+            "  - Set GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON file, or\n"
+            "  - Run: gcloud auth application-default login\n\n"
+            "After setting the environment and restarting ComfyUI, run this node again."
+        )
+
+    def _build_client(self):
+        return genai.Client(
+            vertexai=True,
+            project=self._get_vertex_project(),
+            location=self._get_vertex_location(),
+        )
+
 
 class BurveImageRefPack:
     @classmethod
@@ -1232,6 +1339,65 @@ class BurveDebugGeminiKey:
 
         # Also return it so UI nodes can display it
         return (info,)
+
+
+class BurveDebugVertexAuth:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("info",)
+    FUNCTION = "run"
+    CATEGORY = "BurveTools/Debug"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    def run(self):
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "").strip()
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+        auth_status = "yes" if credentials_path else "maybe"
+        missing_config = []
+        if not project:
+            missing_config.append("GOOGLE_CLOUD_PROJECT")
+        if not location:
+            missing_config.append("GOOGLE_CLOUD_LOCATION")
+
+        info_lines = [
+            "Vertex AI environment status inside ComfyUI:",
+            f"  GOOGLE_CLOUD_PROJECT present: {'yes' if project else 'no'}",
+            f"  GOOGLE_CLOUD_LOCATION present: {'yes' if location else 'no'}",
+            f"  GOOGLE_APPLICATION_CREDENTIALS present: {'yes' if credentials_path else 'no'}",
+            f"  Authentication configured: {auth_status}",
+            "",
+            "This node uses standard Vertex AI auth, not GEMINI_API_KEY.",
+            "Credentials authenticate the request.",
+            "GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION are still required by this node.",
+            "GOOGLE_APPLICATION_CREDENTIALS present: yes does not mean the node is fully configured.",
+            "ADC may also come from: gcloud auth application-default login",
+        ]
+
+        if project:
+            info_lines.append(f"  project = {project}")
+        if location:
+            info_lines.append(f"  location = {location}")
+        if credentials_path:
+            info_lines.append(f"  credentials_path = {credentials_path}")
+        if missing_config:
+            info_lines.append(f"Missing required config: {', '.join(missing_config)}")
+
+        info = "\n".join(info_lines)
+
+        print("========== [BurveDebugVertexAuth] ==========")
+        print(info)
+        print("============================================")
+
+        return (info,)
+
 
 class BurveSystemInstructions:
     @classmethod
