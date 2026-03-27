@@ -1,14 +1,64 @@
-import torch
-import numpy as np
-from PIL import Image
-import os
-import io
-from google import genai
-from google.genai import types
+import math
 import json
-import urllib.request
+import os
+import random
 import ssl
-import hashlib
+import time
+import urllib.request
+
+import numpy as np
+import torch
+from PIL import Image
+try:
+    from PIL.PngImagePlugin import PngInfo
+except ImportError:
+    PngInfo = None
+from google import genai
+from google.genai import errors as genai_errors
+
+try:
+    import folder_paths
+except ImportError:
+    folder_paths = None
+
+try:
+    from .gemini_image_service import (
+        BACKOFF_EXP_BASE,
+        BACKOFF_INITIAL_DELAY_SECONDS,
+        BACKOFF_JITTER_MAX,
+        BACKOFF_JITTER_MIN,
+        BACKOFF_MAX_DELAY_SECONDS,
+        DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        DEFAULT_RETRY_ATTEMPTS,
+        RETRYABLE_STATUS_CODES,
+        SYSTEM_MESSAGES_DEFAULT,
+        THINKING_PROCESS_DEFAULT,
+        append_message_block as append_service_message_block,
+        blank_image_tensor,
+        clone_config_with_http_timeout,
+        ensure_default_text,
+        parse_generate_content_response,
+        prepare_generate_content_request,
+    )
+except ImportError:
+    from gemini_image_service import (
+        BACKOFF_EXP_BASE,
+        BACKOFF_INITIAL_DELAY_SECONDS,
+        BACKOFF_JITTER_MAX,
+        BACKOFF_JITTER_MIN,
+        BACKOFF_MAX_DELAY_SECONDS,
+        DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        DEFAULT_RETRY_ATTEMPTS,
+        RETRYABLE_STATUS_CODES,
+        SYSTEM_MESSAGES_DEFAULT,
+        THINKING_PROCESS_DEFAULT,
+        append_message_block as append_service_message_block,
+        blank_image_tensor,
+        clone_config_with_http_timeout,
+        ensure_default_text,
+        parse_generate_content_response,
+        prepare_generate_content_request,
+    )
 
 try:
     from .character_planner import (
@@ -30,6 +80,8 @@ INSTRUCTIONS_FILE = os.path.join(os.path.dirname(__file__), "system_instructions
 INSTRUCTIONS_URL = "https://raw.githubusercontent.com/Burve/ComfyUI_Burve_Tools/main/system_instructions.json"
 CHARACTER_GEN_PIPE_KIND = "burve.character_gen_pipe"
 CHARACTER_GEN_PIPE_VERSION = 1
+GENERATED_IMAGE_PIPE_KIND = "burve.generated_image_pipe"
+GENERATED_IMAGE_PIPE_VERSION = 1
 CHARACTER_PIPE_OVERRIDE_NOTE = (
     "character_pipe is connected; ignoring direct prompt, system_instructions, and "
     "reference_images inputs."
@@ -61,6 +113,21 @@ RACE_DETAIL_OPTIONS = {
     "head_features": ["none", "animal_muzzle", "full_animal_head", "avian_beak", "tusks", "fangs", "gills", "third_eye", "crest"],
     "hands_arms": ["none", "claws", "talons", "webbed", "scaled_hands", "wing_arms"],
 }
+
+
+class GeminiRequestTimeoutError(RuntimeError):
+    def __init__(self, timeout_seconds, attempts_made, last_error=None):
+        super().__init__(f"Request timed out after {timeout_seconds}s.")
+        self.timeout_seconds = timeout_seconds
+        self.attempts_made = attempts_made
+        self.last_error = last_error
+
+
+class GeminiRequestRetryExhaustedError(RuntimeError):
+    def __init__(self, attempts_made, last_error):
+        super().__init__(f"Request failed after {attempts_made} attempts.")
+        self.attempts_made = attempts_made
+        self.last_error = last_error
 
 def load_instructions():
     if not os.path.exists(INSTRUCTIONS_FILE):
@@ -105,6 +172,8 @@ class BurveGoogleImageGenBase:
 
     @classmethod
     def INPUT_TYPES(s):
+        # Public node schema is defined in v3_extension.py. This fallback exists only
+        # for direct Python use and keeps the common inputs visible without legacy fields.
         return {
             "required": {
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
@@ -112,37 +181,36 @@ class BurveGoogleImageGenBase:
                     ["gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview", "gemini-2.5-flash-image"],
                     {"default": "gemini-2.5-flash-image"},
                 ),
-                "resolution": (["0.5K", "1K", "2K", "4K"], {"default": "1K"}),
-                "aspect_ratio": (
-                    [
-                        "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1",
-                        "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
-                    ],
-                    {"default": "1:1"},
-                ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "search_mode": (
-                    ["legacy_toggles", "off", "web", "image", "web+image"],
-                    {"default": "legacy_toggles"},
-                ),
-                "thinking_mode": (
-                    ["legacy_toggle", "minimal", "high"],
-                    {"default": "legacy_toggle"},
-                ),
             },
             "optional": {
-                "enable_google_search": ("BOOLEAN", {"default": False}),
-                "enable_image_search": ("BOOLEAN", {"default": False}),
-                "enable_thinking_mode": ("BOOLEAN", {"default": True}),
                 "system_instructions": ("STRING", {"multiline": True, "default": ""}),
                 "reference_images": ("IMAGE_LIST",),
                 "character_pipe": ("CHARACTER_GEN_PIPE",),
+                "request_timeout_seconds": (
+                    "INT",
+                    {
+                        "default": DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                        "min": 10,
+                        "max": 1800,
+                        "advanced": True,
+                    },
+                ),
+                "retry_attempts": (
+                    "INT",
+                    {
+                        "default": DEFAULT_RETRY_ATTEMPTS,
+                        "min": 1,
+                        "max": 10,
+                        "advanced": True,
+                    },
+                ),
             },
         }
 
     # normal images, thinking images, thinking text, system messages
-    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING")
-    RETURN_NAMES = ("image", "thinking_image", "thinking_process", "system_messages")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "STRING", "GENERATED_IMAGE_PIPE")
+    RETURN_NAMES = ("image", "thinking_image", "thinking_process", "system_messages", "generated_image_pipe")
     FUNCTION = "generate_image"
     CATEGORY = "BurveTools"
 
@@ -152,29 +220,15 @@ class BurveGoogleImageGenBase:
     def _build_client(self):
         raise NotImplementedError
 
-    def _resolve_search_mode(self, search_mode, enable_google_search, enable_image_search):
-        if search_mode == "off":
-            return False, False
-        if search_mode == "web":
-            return True, False
-        if search_mode == "image":
-            return False, True
-        if search_mode == "web+image":
-            return True, True
-        return bool(enable_google_search), bool(enable_image_search)
-
-    def _resolve_thinking_mode(self, thinking_mode, enable_thinking_mode):
-        if thinking_mode == "minimal":
-            return "minimal", False
-        if thinking_mode == "high":
-            return "high", True
-        if enable_thinking_mode:
-            return "high", True
-        return "minimal", False
-
     def _blank_result(self, system_messages):
-        blank = torch.zeros((1, 64, 64, 3))
-        return (blank, blank.clone(), "", system_messages)
+        blank = blank_image_tensor()
+        return (
+            blank,
+            blank.clone(),
+            THINKING_PROCESS_DEFAULT,
+            ensure_default_text(system_messages, SYSTEM_MESSAGES_DEFAULT),
+            self._empty_generated_image_pipe(model_id="", note="No image was generated."),
+        )
 
     def _is_non_empty_text(self, value):
         return isinstance(value, str) and bool(value.strip())
@@ -306,10 +360,7 @@ class BurveGoogleImageGenBase:
     def _append_message_block(self, system_messages, block_text):
         if not self._is_non_empty_text(block_text):
             return system_messages
-
-        if self._is_non_empty_text(system_messages):
-            return f"{system_messages}\n\n{block_text}"
-        return block_text
+        return append_service_message_block(system_messages, block_text)
 
     def _append_character_pipe_override_note(self, system_messages, ignored_direct_inputs):
         if not ignored_direct_inputs:
@@ -324,57 +375,289 @@ class BurveGoogleImageGenBase:
         planner_block = f"Planner summary:\n{planner_summary}"
         return self._append_message_block(system_messages, planner_block)
 
-    def _stringify_response_detail(self, value):
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value.strip()
+    def _mime_type_to_extension(self, mime_type):
+        return {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/webp": "webp",
+        }.get(mime_type)
 
-        name = getattr(value, "name", None)
-        if isinstance(name, str) and name.strip():
-            return name.strip()
+    def _empty_generated_image_pipe(self, model_id, note=""):
+        return {
+            "kind": GENERATED_IMAGE_PIPE_KIND,
+            "version": GENERATED_IMAGE_PIPE_VERSION,
+            "provider_id": self.PROVIDER_ID,
+            "model_id": model_id,
+            "items": [],
+            "notes": note or "",
+        }
 
-        text = str(value).strip()
-        if text in {"", "None"}:
-            return ""
-        return text
+    def _build_generated_image_pipe(self, parsed_response, provider_id, model_id):
+        artifacts = tuple(getattr(parsed_response, "image_artifacts", ()) or ())
+        if not artifacts:
+            return self._empty_generated_image_pipe(
+                model_id=model_id,
+                note="No normal image artifacts were available in the response.",
+            )
 
-    def _collect_response_diagnostics(self, response, candidate):
-        diagnostics = []
+        items = []
+        notes = []
+        passthrough_supported = provider_id == "vertex"
+        if not passthrough_supported:
+            notes.append("Exact passthrough bytes are unavailable on the Gemini API SDK path.")
 
-        finish_reason = self._stringify_response_detail(
-            getattr(candidate, "finish_reason", None) if candidate is not None else None
+        for artifact in artifacts:
+            mime_type = getattr(artifact, "mime_type", None)
+            extension = self._mime_type_to_extension(mime_type)
+            raw_bytes = getattr(artifact, "raw_bytes", None)
+            source = getattr(artifact, "source", "unavailable")
+            if passthrough_supported and raw_bytes is not None and extension is not None:
+                item_raw_bytes = raw_bytes
+                item_source = source or "response_bytes"
+            else:
+                item_raw_bytes = None
+                item_source = "unavailable"
+            items.append(
+                {
+                    "mime_type": mime_type,
+                    "extension": extension,
+                    "raw_bytes": item_raw_bytes,
+                    "sha256": getattr(artifact, "sha256", ""),
+                    "source": item_source,
+                }
+            )
+
+        return {
+            "kind": GENERATED_IMAGE_PIPE_KIND,
+            "version": GENERATED_IMAGE_PIPE_VERSION,
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "items": items,
+            "notes": "\n".join(notes),
+        }
+
+    def _normalize_generated_image_pipe(self, generated_image_pipe):
+        if generated_image_pipe is None:
+            return None
+        if not isinstance(generated_image_pipe, dict):
+            raise ValueError("Invalid generated_image_pipe: expected a dict payload.")
+        if generated_image_pipe.get("kind") != GENERATED_IMAGE_PIPE_KIND:
+            raise ValueError("Invalid generated_image_pipe: unexpected kind.")
+        if generated_image_pipe.get("version") != GENERATED_IMAGE_PIPE_VERSION:
+            raise ValueError("Invalid generated_image_pipe: unsupported version.")
+        items = generated_image_pipe.get("items", [])
+        if not isinstance(items, list):
+            raise ValueError("Invalid generated_image_pipe: items must be a list.")
+
+        normalized_items = []
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"Invalid generated_image_pipe: item {index} must be a dict.")
+            raw_bytes = item.get("raw_bytes")
+            if raw_bytes is not None and not isinstance(raw_bytes, (bytes, bytearray)):
+                raise ValueError(f"Invalid generated_image_pipe: item {index} raw_bytes must be bytes.")
+            mime_type = item.get("mime_type")
+            if mime_type is not None and not isinstance(mime_type, str):
+                raise ValueError(f"Invalid generated_image_pipe: item {index} mime_type must be a string.")
+            normalized_items.append(
+                {
+                    "mime_type": mime_type,
+                    "extension": item.get("extension"),
+                    "raw_bytes": bytes(raw_bytes) if raw_bytes is not None else None,
+                    "sha256": str(item.get("sha256", "")),
+                    "source": str(item.get("source", "unavailable")),
+                }
+            )
+
+        notes = generated_image_pipe.get("notes", "")
+        if not isinstance(notes, str):
+            raise ValueError("Invalid generated_image_pipe: notes must be a string.")
+
+        return {
+            "kind": GENERATED_IMAGE_PIPE_KIND,
+            "version": GENERATED_IMAGE_PIPE_VERSION,
+            "provider_id": str(generated_image_pipe.get("provider_id", "")),
+            "model_id": str(generated_image_pipe.get("model_id", "")),
+            "items": normalized_items,
+            "notes": notes,
+        }
+
+    def _normalize_request_timeout_seconds(self, value):
+        if not isinstance(value, int):
+            raise ValueError("request_timeout_seconds must be an integer.")
+        if value < 10 or value > 1800:
+            raise ValueError("request_timeout_seconds must be between 10 and 1800.")
+        return value
+
+    def _normalize_retry_attempts(self, value):
+        if not isinstance(value, int):
+            raise ValueError("retry_attempts must be an integer.")
+        if value < 1 or value > 10:
+            raise ValueError("retry_attempts must be between 1 and 10.")
+        return value
+
+    def _is_timeout_like_error(self, error):
+        if isinstance(error, TimeoutError):
+            return True
+
+        class_name = type(error).__name__.lower()
+        module_name = type(error).__module__.lower()
+        message = str(error).lower()
+
+        if "timeout" in class_name or "timed out" in message:
+            return True
+
+        timeout_modules = ("httpx", "httpcore", "socket")
+        if module_name.startswith(timeout_modules) and "timeout" in class_name:
+            return True
+
+        return False
+
+    def _is_connection_like_error(self, error):
+        class_name = type(error).__name__.lower()
+        module_name = type(error).__module__.lower()
+        connection_markers = (
+            "connecterror",
+            "readerror",
+            "remoteprotocolerror",
+            "networkerror",
+            "protocolerror",
         )
-        if finish_reason:
-            diagnostics.append(f"Finish reason: {finish_reason}")
+        if class_name in connection_markers:
+            return True
+        return module_name.startswith(("httpx", "httpcore")) and class_name in connection_markers
 
-        candidate_feedback = self._stringify_response_detail(
-            getattr(candidate, "safety_ratings", None) if candidate is not None else None
+    def _is_retryable_generate_error(self, error):
+        if isinstance(error, genai_errors.APIError):
+            return getattr(error, "code", None) in RETRYABLE_STATUS_CODES
+        return self._is_timeout_like_error(error) or self._is_connection_like_error(error)
+
+    def _compute_backoff_delay_seconds(self, attempt_index):
+        base_delay = min(
+            BACKOFF_INITIAL_DELAY_SECONDS * (BACKOFF_EXP_BASE ** attempt_index),
+            BACKOFF_MAX_DELAY_SECONDS,
         )
-        if candidate_feedback:
-            diagnostics.append(f"Candidate feedback: {candidate_feedback}")
+        return base_delay * random.uniform(BACKOFF_JITTER_MIN, BACKOFF_JITTER_MAX)
 
-        prompt_feedback = self._stringify_response_detail(getattr(response, "prompt_feedback", None))
-        if prompt_feedback:
-            diagnostics.append(f"Prompt feedback: {prompt_feedback}")
+    def _request_generate_content(
+        self,
+        *,
+        client,
+        request,
+        request_timeout_seconds,
+        retry_attempts,
+    ):
+        deadline = time.monotonic() + request_timeout_seconds
+        attempts_made = 0
+        last_retryable_error = None
 
-        return diagnostics
+        for attempt_index in range(retry_attempts):
+            attempts_made = attempt_index + 1
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise GeminiRequestTimeoutError(
+                    request_timeout_seconds,
+                    max(attempts_made - 1, 0),
+                    last_retryable_error,
+                )
+
+            timed_config = clone_config_with_http_timeout(
+                request.config,
+                max(int(remaining_seconds * 1000), 1),
+            )
+
+            try:
+                return client.models.generate_content(
+                    model=request.model_id,
+                    contents=request.contents,
+                    config=timed_config,
+                )
+            except Exception as error:
+                if not self._is_retryable_generate_error(error):
+                    raise
+
+                last_retryable_error = error
+                if attempt_index >= retry_attempts - 1:
+                    raise GeminiRequestRetryExhaustedError(attempts_made, error) from error
+
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise GeminiRequestTimeoutError(
+                        request_timeout_seconds,
+                        attempts_made,
+                        error,
+                    ) from error
+
+                delay_seconds = min(
+                    self._compute_backoff_delay_seconds(attempt_index),
+                    remaining_seconds,
+                )
+                if delay_seconds <= 0:
+                    raise GeminiRequestTimeoutError(
+                        request_timeout_seconds,
+                        attempts_made,
+                        error,
+                    ) from error
+                time.sleep(delay_seconds)
+
+        raise GeminiRequestRetryExhaustedError(attempts_made, last_retryable_error)
+
+    def _describe_retry_error(self, error):
+        code = getattr(error, "code", None)
+        status = getattr(error, "status", None)
+        details = []
+        if code is not None:
+            details.append(f"status {code}")
+        if status:
+            details.append(str(status))
+        if details:
+            return ", ".join(details)
+        return str(error).strip()
+
+    def _format_generation_error(self, error, model_id, request_timeout_seconds):
+        if isinstance(error, GeminiRequestTimeoutError):
+            message = (
+                f"Error: Request timed out after {request_timeout_seconds}s waiting for "
+                "Gemini image generation."
+            )
+            if error.attempts_made:
+                message += f"\nAttempts completed: {error.attempts_made}."
+            if error.last_error is not None and str(error.last_error).strip():
+                message += f"\nLast error: {error.last_error}"
+        elif isinstance(error, GeminiRequestRetryExhaustedError):
+            retry_detail = self._describe_retry_error(error.last_error)
+            message = f"Error: Request failed after {error.attempts_made} attempts."
+            if retry_detail:
+                message += f"\nLast error: {retry_detail}"
+        else:
+            message = f"Error: {str(error)}"
+
+        if model_id == "gemini-3.1-flash-image-preview":
+            message += (
+                "\nTry global location, lower resolution, MINIMAL thinking, or a "
+                "higher advanced timeout."
+            )
+        return message
+
+    def _resolve_model_id_for_error(self, model):
+        if isinstance(model, dict):
+            model_id = model.get("model")
+            if isinstance(model_id, str) and model_id.strip():
+                return model_id.strip()
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+        return ""
 
     def generate_image(
         self,
         prompt,
         model,
-        resolution,
-        aspect_ratio,
         seed,
-        search_mode="legacy_toggles",
-        enable_google_search=False,
-        enable_image_search=False,
-        thinking_mode="legacy_toggle",
-        enable_thinking_mode=True,
         system_instructions="",
         reference_images=None,
         character_pipe=None,
+        request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        retry_attempts=DEFAULT_RETRY_ATTEMPTS,
     ):
         try:
             resolved_inputs = self._resolve_generation_inputs(
@@ -383,6 +666,8 @@ class BurveGoogleImageGenBase:
                 reference_images=reference_images,
                 character_pipe=character_pipe,
             )
+            request_timeout_seconds = self._normalize_request_timeout_seconds(request_timeout_seconds)
+            retry_attempts = self._normalize_retry_attempts(retry_attempts)
         except ValueError as e:
             return self._blank_result(str(e))
 
@@ -404,85 +689,51 @@ class BurveGoogleImageGenBase:
             )
 
         try:
+            model_id_for_error = self._resolve_model_id_for_error(model)
             client = self._build_client()
-            preflight_messages = []
-
-            extra_flash31_aspects = {"1:4", "4:1", "1:8", "8:1"}
-
-            requested_web_search, requested_image_search = self._resolve_search_mode(
-                search_mode,
-                enable_google_search,
-                enable_image_search,
+            request = prepare_generate_content_request(
+                provider_id=self.PROVIDER_ID,
+                prompt=prompt,
+                model=model,
+                seed=seed,
+                system_instructions=system_instructions,
+                reference_images=reference_images,
             )
-            flash31_thinking_level, flash31_include_thoughts = self._resolve_thinking_mode(
-                thinking_mode,
-                enable_thinking_mode,
+            model_id_for_error = request.model_id
+            response = self._request_generate_content(
+                client=client,
+                request=request,
+                request_timeout_seconds=request_timeout_seconds,
+                retry_attempts=retry_attempts,
+            )
+            parsed_response = parse_generate_content_response(
+                response,
+                preflight_messages=request.preflight_messages,
             )
 
-            legacy_web_search = bool(enable_google_search)
-            legacy_image_search = bool(enable_image_search)
-            if search_mode != "legacy_toggles":
-                if requested_web_search != legacy_web_search or requested_image_search != legacy_image_search:
-                    preflight_messages.append(
-                        "search_mode overrides legacy search toggles."
-                    )
-
-            legacy_thinking_level, legacy_include_thoughts = self._resolve_thinking_mode(
-                "legacy_toggle",
-                enable_thinking_mode,
+            system_messages = self._append_character_pipe_override_note(
+                parsed_response.system_messages,
+                ignored_direct_inputs,
             )
-            if thinking_mode != "legacy_toggle":
-                if (
-                    flash31_thinking_level != legacy_thinking_level
-                    or flash31_include_thoughts != legacy_include_thoughts
-                ):
-                    preflight_messages.append(
-                        "thinking_mode overrides enable_thinking_mode toggle."
-                    )
+            system_messages = self._append_planner_summary(
+                system_messages,
+                planner_summary,
+                character_pipe_connected,
+            )
+            system_messages = ensure_default_text(system_messages, SYSTEM_MESSAGES_DEFAULT)
+            generated_image_pipe = self._build_generated_image_pipe(
+                parsed_response,
+                provider_id=self.PROVIDER_ID,
+                model_id=model_id_for_error,
+            )
 
-            web_search_enabled = requested_web_search
-            image_search_enabled = requested_image_search
-
-            selected_resolution = resolution
-            selected_aspect_ratio = aspect_ratio
-
-            if model in {"gemini-2.5-flash-image", "gemini-3-pro-image-preview"} and aspect_ratio in extra_flash31_aspects:
-                selected_aspect_ratio = "1:1"
-                preflight_messages.append(
-                    f"Aspect ratio {aspect_ratio} is only supported by gemini-3.1-flash-image-preview. "
-                    "Falling back to 1:1."
-                )
-
-            if model == "gemini-3-pro-image-preview" and resolution == "0.5K":
-                selected_resolution = "1K"
-                preflight_messages.append(
-                    "Resolution 0.5K is only supported by gemini-3.1-flash-image-preview. Falling back to 1K."
-                )
-
-            if model == "gemini-2.5-flash-image" and (web_search_enabled or image_search_enabled):
-                preflight_messages.append(
-                    "Search tools are not used for gemini-2.5-flash-image in this node. Ignoring search settings."
-                )
-                web_search_enabled = False
-                image_search_enabled = False
-
-            if model == "gemini-3-pro-image-preview" and image_search_enabled:
-                preflight_messages.append(
-                    "Image search is only supported by gemini-3.1-flash-image-preview. Ignoring image search setting."
-                )
-                image_search_enabled = False
-
-            if model != "gemini-3.1-flash-image-preview":
-                if thinking_mode != "legacy_toggle":
-                    preflight_messages.append(
-                        "thinking_mode dropdown applies only to gemini-3.1-flash-image-preview in this node."
-                    )
-                elif not enable_thinking_mode:
-                    preflight_messages.append(
-                        "enable_thinking_mode toggle is only used by gemini-3.1-flash-image-preview in this node."
-                    )
-
-            contents = [prompt]
+            return (
+                parsed_response.image_batch,
+                parsed_response.thinking_image_batch,
+                parsed_response.thinking_process,
+                system_messages,
+                generated_image_pipe,
+            )
 
             # --- HANDLE REFERENCES AS A LIST ---
             if reference_images is not None:
@@ -543,6 +794,7 @@ class BurveGoogleImageGenBase:
                 tools.append(types.Tool(google_search=types.GoogleSearch()))
 
             config = None
+            manual_thinking_config = None
 
             if model == "gemini-2.5-flash-image":
                 # Request image output explicitly while keeping the config otherwise minimal.
@@ -561,44 +813,40 @@ class BurveGoogleImageGenBase:
                     aspect_ratio=selected_aspect_ratio,
                     image_size=selected_resolution,
                 )
-                thinking_cfg = types.ThinkingConfig(
-                    thinking_level=flash31_thinking_level,
-                    include_thoughts=flash31_include_thoughts,
-                )
                 config = types.GenerateContentConfig(
                     response_modalities=["TEXT", "IMAGE"],
                     image_config=image_cfg,
                     tools=tools if tools else None,
                     system_instruction=system_instructions or None,
                     seed=seed % 2147483647 if seed is not None else None,
-                    thinking_config=thinking_cfg,
                 )
+                manual_thinking_config = {
+                    "includeThoughts": flash31_include_thoughts,
+                    "thinkingLevel": flash31_thinking_level,
+                }
             elif model == "gemini-3-pro-image-preview":
-                # Full config: aspect ratio, resolution, thinking, text+image
+                # Full config: aspect ratio, resolution, text+image
                 image_cfg = types.ImageConfig(
                     aspect_ratio=selected_aspect_ratio,
                     image_size=selected_resolution,
                 )
-                thinking_cfg = types.ThinkingConfig(
-                    include_thoughts=True,
-                    # optional: thinking_budget / thinking_level
-                )
                 config = types.GenerateContentConfig(
                     response_modalities=["TEXT", "IMAGE"],
                     image_config=image_cfg,
                     tools=tools if tools else None,
                     system_instruction=system_instructions or None,
                     seed=seed % 2147483647 if seed is not None else None,
-                    thinking_config=thinking_cfg,
                 )
             else:
                 raise ValueError(f"Unsupported model: {model}")
 
             # Call API
-            response = client.models.generate_content(
+            response = self._request_generate_content(
+                client=client,
                 model=model,
                 contents=contents,
                 config=config,
+                manual_thinking_config=manual_thinking_config,
             )
 
             normal_images = []    # non-thinking images
@@ -685,10 +933,9 @@ class BurveGoogleImageGenBase:
             thinking_process = "\n".join(thought_chunks).strip()
             answer_text = "\n".join(answer_chunks).strip()
 
-            # For 3 Pro and 3.1 Flash Image we expect thought summaries when thinking output is enabled
+            # Thought summaries are only requested for 3.1 Flash Image in this node.
             expects_thought_summary = (
-                model == "gemini-3-pro-image-preview"
-                or (model == "gemini-3.1-flash-image-preview" and flash31_include_thoughts)
+                model == "gemini-3.1-flash-image-preview" and flash31_include_thoughts
             )
 
             if expects_thought_summary:
@@ -735,7 +982,11 @@ class BurveGoogleImageGenBase:
             return self._blank_result(
                 self._append_planner_summary(
                     self._append_character_pipe_override_note(
-                        f"Error: {str(e)}",
+                        self._format_generation_error(
+                            e,
+                            model_id_for_error,
+                            request_timeout_seconds,
+                        ),
                         ignored_direct_inputs,
                     ),
                     planner_summary,
@@ -1658,6 +1909,222 @@ class BurveBlindGridSplitter:
 
         out = torch.cat(tiles, dim=0)
         return (out,)
+
+
+class BurveImageInfo:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "INT", "INT", "STRING")
+    RETURN_NAMES = ("info", "width", "height", "aspect_ratio")
+    FUNCTION = "inspect"
+    CATEGORY = "BurveTools"
+    OUTPUT_NODE = True
+
+    def inspect(self, image):
+        shape = getattr(image, "shape", None)
+        if shape is None or len(shape) != 4:
+            raise ValueError("[BurveImageInfo] Expected IMAGE tensor with shape (B, H, W, C).")
+
+        height = int(shape[1])
+        width = int(shape[2])
+
+        if height < 1 or width < 1:
+            raise ValueError("[BurveImageInfo] Received empty image tensor.")
+
+        divisor = math.gcd(width, height) or 1
+        aspect_ratio = f"{width // divisor}:{height // divisor}"
+        info = f"Size: {width}x{height} px\nAspect ratio: {aspect_ratio}"
+        return (info, width, height, aspect_ratio)
+
+
+class BurveSaveGeneratedImage:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "filename_prefix": ("STRING", {"default": "Burve"}),
+            },
+            "optional": {
+                "generated_image_pipe": ("GENERATED_IMAGE_PIPE",),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("saved_files",)
+    FUNCTION = "save"
+    CATEGORY = "BurveTools"
+    OUTPUT_NODE = True
+
+    def _mime_type_to_extension(self, mime_type):
+        return {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/webp": "webp",
+        }.get(mime_type)
+
+    def _normalize_generated_image_pipe(self, generated_image_pipe):
+        if generated_image_pipe is None:
+            return None
+        if not isinstance(generated_image_pipe, dict):
+            raise ValueError("Invalid generated_image_pipe: expected a dict payload.")
+        if generated_image_pipe.get("kind") != GENERATED_IMAGE_PIPE_KIND:
+            raise ValueError("Invalid generated_image_pipe: unexpected kind.")
+        if generated_image_pipe.get("version") != GENERATED_IMAGE_PIPE_VERSION:
+            raise ValueError("Invalid generated_image_pipe: unsupported version.")
+        items = generated_image_pipe.get("items", [])
+        if not isinstance(items, list):
+            raise ValueError("Invalid generated_image_pipe: items must be a list.")
+        notes = generated_image_pipe.get("notes", "")
+        if not isinstance(notes, str):
+            raise ValueError("Invalid generated_image_pipe: notes must be a string.")
+        return generated_image_pipe
+
+    def _get_output_directory(self):
+        if folder_paths is not None and hasattr(folder_paths, "get_output_directory"):
+            output_dir = folder_paths.get_output_directory()
+        else:
+            output_dir = os.path.join(os.getcwd(), "output")
+        os.makedirs(output_dir, exist_ok=True)
+        return output_dir
+
+    def _sanitize_prefix(self, filename_prefix):
+        safe = str(filename_prefix or "Burve").strip().replace("\\", "/")
+        if not safe:
+            return "Burve"
+        parts = [part for part in safe.split("/") if part not in {"", "."}]
+        sanitized_parts = []
+        for part in parts:
+            sanitized_part = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in part)
+            if sanitized_part:
+                sanitized_parts.append(sanitized_part)
+        if not sanitized_parts:
+            return "Burve"
+        return "/".join(sanitized_parts)
+
+    def _fallback_get_save_image_path(self, filename_prefix, image_width=0, image_height=0):
+        output_dir = self._get_output_directory()
+        normalized_prefix = self._sanitize_prefix(filename_prefix)
+        subfolder = os.path.dirname(os.path.normpath(normalized_prefix))
+        if subfolder in {"", "."}:
+            subfolder = ""
+        filename = os.path.basename(os.path.normpath(normalized_prefix)) or "Burve"
+        full_output_folder = os.path.join(output_dir, subfolder) if subfolder else output_dir
+        os.makedirs(full_output_folder, exist_ok=True)
+        counter = 1
+        while True:
+            prefix = f"{filename}_{counter:05d}_"
+            if not any(name.startswith(prefix) for name in os.listdir(full_output_folder)):
+                break
+            counter += 1
+        return full_output_folder, filename, counter, subfolder, normalized_prefix
+
+    def _get_save_image_path(self, filename_prefix, image_width=0, image_height=0):
+        output_dir = self._get_output_directory()
+        if folder_paths is not None and hasattr(folder_paths, "get_save_image_path"):
+            return folder_paths.get_save_image_path(filename_prefix, output_dir, image_width, image_height)
+        return self._fallback_get_save_image_path(filename_prefix, image_width, image_height)
+
+    def _build_png_metadata(self, prompt=None, extra_pnginfo=None):
+        if PngInfo is None:
+            return None
+        if prompt is None and not isinstance(extra_pnginfo, dict):
+            return None
+        metadata = PngInfo()
+        if prompt is not None:
+            metadata.add_text("prompt", json.dumps(prompt))
+        if isinstance(extra_pnginfo, dict):
+            for key, value in extra_pnginfo.items():
+                metadata.add_text(key, json.dumps(value))
+        return metadata
+
+    def _save_png_fallback(self, frame, output_path, prompt=None, extra_pnginfo=None):
+        image_np = (frame.cpu().numpy().clip(0.0, 1.0) * 255).astype(np.uint8)
+        metadata = self._build_png_metadata(prompt=prompt, extra_pnginfo=extra_pnginfo)
+        save_kwargs = {"format": "PNG"}
+        if metadata is not None:
+            save_kwargs["pnginfo"] = metadata
+        Image.fromarray(image_np).save(output_path, **save_kwargs)
+        return output_path
+
+    def save(self, image, filename_prefix="Burve", generated_image_pipe=None, prompt=None, extra_pnginfo=None):
+        shape = getattr(image, "shape", None)
+        if shape is None or len(shape) != 4:
+            raise ValueError("[BurveSaveGeneratedImage] Expected IMAGE tensor with shape (B, H, W, C).")
+
+        normalized_pipe = self._normalize_generated_image_pipe(generated_image_pipe)
+        batch_size = int(shape[0])
+        lines = []
+        ui_images = []
+        mismatch = False
+        if normalized_pipe is not None and len(normalized_pipe.get("items", [])) != batch_size:
+            mismatch = True
+            lines.append("generated_image_pipe item count did not match the image batch; saved all frames as PNG fallback.")
+
+        full_output_folder, filename, counter, subfolder, _ = self._get_save_image_path(
+            filename_prefix,
+            int(shape[2]),
+            int(shape[1]),
+        )
+
+        for index in range(batch_size):
+            frame = image[index]
+            item = None
+            if normalized_pipe is not None and not mismatch:
+                item = normalized_pipe["items"][index]
+
+            filename_with_batch_num = filename.replace("%batch_num%", str(index))
+            mime_type = item.get("mime_type") if item else None
+            extension = self._mime_type_to_extension(mime_type) if mime_type else None
+            raw_bytes = item.get("raw_bytes") if item else None
+
+            if raw_bytes is not None and extension is not None:
+                file = f"{filename_with_batch_num}_{counter:05}_.{extension}"
+                output_path = os.path.join(full_output_folder, file)
+                with open(output_path, "wb") as handle:
+                    handle.write(raw_bytes)
+                lines.append(output_path)
+            else:
+                file = f"{filename_with_batch_num}_{counter:05}_.png"
+                output_path = os.path.join(full_output_folder, file)
+                self._save_png_fallback(
+                    frame,
+                    output_path,
+                    prompt=prompt,
+                    extra_pnginfo=extra_pnginfo,
+                )
+                if item is not None and item.get("raw_bytes") is None:
+                    lines.append(f"{output_path}\nframe {index + 1}: raw bytes unavailable, saved PNG fallback")
+                elif item is not None and extension is None and mime_type:
+                    lines.append(f"{output_path}\nframe {index + 1}: unsupported mime_type {mime_type}, saved PNG fallback")
+                else:
+                    lines.append(output_path)
+            ui_images.append(
+                {
+                    "filename": file,
+                    "subfolder": subfolder,
+                    "type": "output",
+                }
+            )
+            counter += 1
+
+        if normalized_pipe is not None and normalized_pipe.get("notes"):
+            lines.append(normalized_pipe["notes"])
+
+        return {
+            "ui": {"images": ui_images},
+            "result": ("\n".join(lines),),
+        }
 
 
 class BurvePromptSelector14:

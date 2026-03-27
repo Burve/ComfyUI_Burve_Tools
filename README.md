@@ -10,29 +10,39 @@ This is the AI Studio version of the main image-generation node.
 *   **Functionality**: Generates images based on text prompts, with support for system instructions and reference images.
 *   **Inputs**:
     *   `prompt`: The description of the image you want to generate. When `character_pipe` is connected, this direct field is ignored.
-    *   `model`: Select between `gemini-3.1-flash-image-preview`, `gemini-3-pro-image-preview`, and `gemini-2.5-flash-image`.
-    *   `resolution`: Output resolution (`0.5K`, `1K`, `2K`, `4K`). (`0.5K` is for 3.1 Flash Image.)
-    *   `aspect_ratio`: Desired aspect ratio. Includes extra 3.1 Flash Image ratios (`1:4`, `4:1`, `1:8`, `8:1`) plus standard ratios.
+    *   `model`: A DynamicCombo model selector. The selected model controls which nested fields are shown.
+    *   Common fields outside the DynamicCombo: `seed` with `control_after_generate`, `system_instructions`, `reference_images`, `character_pipe`.
+    *   `gemini-2.5-flash-image` fields: `aspect_ratio`
+    *   `gemini-3-pro-image-preview` fields: `aspect_ratio`, `resolution`, `search_mode`
+    *   `gemini-3-pro-image-preview` may still return thought text and thought images in the existing outputs, but it does not expose user-configurable thinking controls.
+    *   `gemini-3.1-flash-image-preview` fields: `aspect_ratio`, `resolution`, `search_mode`, `thinking_level`, `include_thoughts`, `output_mime_type`, `prominent_people`
+    *   `resolution` values:
+        `gemini-3-pro-image-preview`: `1K`, `2K`, `4K`
+        `gemini-3.1-flash-image-preview`: `512`, `1K`, `2K`, `4K`
+    *   `search_mode` values:
+        `gemini-3-pro-image-preview`: `off`, `web`
+        `gemini-3.1-flash-image-preview`: `off`, `web`, `image`, `web+image`
+    *   `thinking_level` values:
+        `gemini-3.1-flash-image-preview`: `MINIMAL`, `HIGH`
+    *   `output_mime_type` values for `gemini-3.1-flash-image-preview`: `image/png`, `image/jpeg`, `image/webp`
+    *   `prominent_people` values for `gemini-3.1-flash-image-preview`: `allow`, `block`
     *   `seed`: Seed for reproducibility.
-    *   `search_mode`: Preferred search control (`legacy_toggles`, `off`, `web`, `image`, `web+image`).
-    *   `thinking_mode`: Preferred thinking control (`legacy_toggle`, `minimal`, `high`) for `gemini-3.1-flash-image-preview`.
-    *   `(legacy, optional) enable_google_search`: Enables Google Search grounding when supported by the selected model.
-    *   `(legacy, optional) enable_image_search`: Enables Google Image Search grounding for `gemini-3.1-flash-image-preview`.
-    *   `(legacy, optional) enable_thinking_mode`: Legacy toggle for 3.1 Flash Image reasoning intensity (`on` = high, `off` = minimal + hidden thoughts).
-    *   Legacy compatibility: if `search_mode` is `legacy_toggles`, the node uses `(legacy) enable_google_search` + `(legacy) enable_image_search`; if `thinking_mode` is `legacy_toggle`, it uses `(legacy) enable_thinking_mode`.
     *   `system_instructions` (Optional): Advanced instructions to guide the model's behavior. Ignored when `character_pipe` is connected.
     *   `reference_images` (Optional): A list of images to use as context/reference for the generation. Use the **Burve Image Ref Pack** node or the **Burve Character Planner** node to create this list. Ignored when `character_pipe` is connected.
     *   `character_pipe` (Optional): A one-cable `CHARACTER_GEN_PIPE` bundle from **Burve Character Planner**. When connected, the node becomes pipe-authoritative and uses the planner's `prompt`, `system_instructions`, and `reference_images`.
+    *   Advanced optional request controls:
+        `request_timeout_seconds`: Overall Gemini request timeout budget in seconds. Default: `120`.
+        `retry_attempts`: Total attempts for transient request failures. Default: `5`. `1` disables retries.
 *   **Outputs**:
     *   `image`: The generated image(s).
     *   `thinking_image`: Any thought-stage image(s) returned by the model.
-    *   `thinking_process`: Reasoning/thought text (when returned by the model).
-    *   `system_messages`: Error messages or status updates (e.g., if the API key is missing).
+    *   `thinking_process`: Reasoning/thought text. If the model returns none, the node outputs `No thinking output returned by the model.`
+    *   `system_messages`: Error messages or status updates. If the model returns none, the node outputs `No system messages.` Requests that exceed the timeout budget now fail with a bounded timeout error instead of waiting indefinitely.
 
 ### 2. Burve Google Image Gen (Vertex AI)
 This is the Vertex AI version of the same image-generation node.
 
-*   **Functionality**: Uses the same generation logic, inputs, outputs, and feature set as **Burve Google Image Gen**, but authenticates through Vertex AI instead of AI Studio.
+*   **Functionality**: Uses the same generation logic, DynamicCombo model UI, inputs, and outputs as **Burve Google Image Gen**, but authenticates through Vertex AI instead of AI Studio.
 *   **Inputs**: Identical to **Burve Google Image Gen**.
 *   **Outputs**: Identical to **Burve Google Image Gen**.
 *   **Authentication**: Uses `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, and Google credentials / ADC. It does not use `GEMINI_API_KEY`.
@@ -87,7 +97,19 @@ Loads prompts from a database and injects variables.
     *   `title`: The title of the selected prompt.
 
 
-### 9. Burve Blind Grid Splitter
+### 9. Burve Image Info
+Reports the dimensions and aspect ratio of an input image.
+
+*   **Functionality**: Reads a standard ComfyUI `IMAGE` tensor, reports its pixel size, and returns a simplified `W:H` aspect ratio string.
+*   **Inputs**:
+    *   `image`: The input image from a node such as `Load Image`.
+*   **Outputs**:
+    *   `info`: Human-readable text such as `Size: 1024x768 px` and `Aspect ratio: 4:3`.
+    *   `width`: Image width in pixels.
+    *   `height`: Image height in pixels.
+    *   `aspect_ratio`: Simplified ratio string such as `4:3`, `16:9`, or `1:1`.
+
+### 10. Burve Blind Grid Splitter
 Splits an image into a grid of tiles without content analysis.
 
 *   **Functionality**: Slices an input image into a specified number of rows and columns. Useful for processing large images in chunks.
@@ -99,7 +121,7 @@ Splits an image into a grid of tiles without content analysis.
 *   **Outputs**:
     *   `tiles`: A batch of images containing the resulting grid tiles.
 
-### 10. Burve Character Planner
+### 11. Burve Character Planner
 Builds a reusable base-character prompt bundle for `Burve Google Image Gen`.
 
 *   **Functionality**: Combines curated body, age, gender, race, and appearance controls with optional raw JSON overrides, emits a generation-ready prompt, emits optional face-lock system instructions, and packs ordered reference images with the dedicated face image first.
@@ -122,7 +144,7 @@ Builds a reusable base-character prompt bundle for `Burve Google Image Gen`.
     *   `summary`: Validation/status output including gender, age, race, fantasy traits, ignored gender-specific controls, face-lock state, reference count, and warnings
     *   `character_pipe`: One-cable `CHARACTER_GEN_PIPE` bundle carrying the generation-ready prompt, optional system instructions, packed reference images, and planner metadata
 *   **Notes**:
-    *   v1 ships with no custom JS, live badges, or `WEB_DIRECTORY` frontend extension.
+    *   v1 ships with no custom JS or live badges.
     *   Visual feedback is limited to validation errors plus the `summary` output.
     *   The built-in outfit presets stay non-explicit and intentionally minimal for silhouette readability.
     *   Female mode uses the existing bikini-style basewear presets. Male mode uses underwear presets with `base_outfit.top.type = none`.
@@ -130,7 +152,7 @@ Builds a reusable base-character prompt bundle for `Burve Google Image Gen`.
     *   `custom_race`, `custom_skin_tone`, and `custom_hair_color` are inline empty override widgets next to the values they replace.
     *   `plan_overrides_json` still has final precedence, but contradictory male/female outfit or underage overrides are rejected.
 
-### 11. Burve Character Race Details
+### 12. Burve Character Race Details
 Builds a reusable fantasy race-detail bundle for `Burve Character Planner`.
 
 *   **Functionality**: Produces a `CHARACTER_RACE_PIPE` with optional race-name override plus curated fantasy anatomy traits such as wings, horns, tails, hooves, scales, claws, and related head or limb features.
@@ -221,6 +243,8 @@ Example `plan_overrides_json` fallback:
     pip install -r requirements.txt
     ```
     (Note: You may need to use the `pip` associated with your ComfyUI python environment, e.g., `python_embeded/python.exe -m pip install ...` if using the portable version).
+3.  Use a DynamicCombo-capable ComfyUI build. This release now loads through V3 `comfy_entrypoint()` and requires `IO.DynamicCombo.Input(...)`.
+4.  `google-genai>=1.68.0,<2` is required for Gemini image search, documented thinking config, and `prominent_people` support.
 
 ## Authentication Setup
 
@@ -283,6 +307,7 @@ If the debug node shows `GEMINI_API_KEY is NOT set`:
 *   Fully quit and relaunch ComfyUI after changing the environment variable.
 *   Check that the key does not contain accidental whitespace or a trailing newline.
 *   If you get a tiny black placeholder image plus `No non-thinking image generated.`, the request may have completed without returning a usable image part. Inspect `system_messages` for finish reason or prompt feedback, retry the prompt, and try another supported image model if the response looks text-only or blocked.
+*   This major release removes the old Gemini legacy widgets. Saved workflows using the previous static Gemini parameter list will not retain those removed widget values.
 
 ### Vertex AI Setup (`Burve Google Image Gen (Vertex AI)`)
 
@@ -464,6 +489,17 @@ Important:
 *   Cause: The chosen location may not support the model or your project setup.
 *   Fix: Try `global` first and verify model availability for your project and region.
 
+**Symptom:** The image node stays active for a long time and appears stuck
+
+*   Cause: The Gemini request is slow, retrying transient failures, or not returning within the configured timeout budget.
+*   Fix: Inspect `system_messages` after the node finishes. If you are using `gemini-3.1-flash-image-preview`, try `global`, lower `resolution`, `MINIMAL` `thinking_level`, or a higher advanced `request_timeout_seconds`.
+*   The node now uses a bounded timeout and returns an explicit timeout or retry-exhaustion error instead of waiting indefinitely.
+
+**Symptom:** `gemini-3.1-flash-image-preview` is slow
+
+*   Cause: This model is still in Preview on Vertex AI, supports Thinking, and uses the `global` location. Higher resolution and higher thinking levels can increase latency.
+*   Fix: Start with `global`, `1K` or `2K`, and `MINIMAL` thinking when you need a more responsive workflow.
+
 ### What this node actually uses
 
 The node currently uses:
@@ -478,6 +514,7 @@ That means:
 *   `Burve Google Image Gen (Vertex AI)` does **not** use `GEMINI_API_KEY`.
 *   Vertex auth is Google credentials / ADC plus project and location.
 *   `GOOGLE_GENAI_USE_VERTEXAI` is optional for the SDK in general, but not required by this node's current implementation.
+*   `gemini-3.1-flash-image-preview` is documented by Google as a Preview model and global-only on Vertex AI as of March 25, 2026.
 
 Official references:
 

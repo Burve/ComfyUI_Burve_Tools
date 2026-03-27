@@ -1,33 +1,22 @@
-from .nodes import BurveGoogleImageGen, BurveVertexImageGen, BurveImageRefPack, BurveCharacterPlanner, BurveCharacterRaceDetails, BurveDebugGeminiKey, BurveDebugVertexAuth, BurveSystemInstructions, BurveVariableInjector, BurvePromptDatabase, BurveBlindGridSplitter, BurvePromptSelector14
+async def comfy_entrypoint():
+    try:
+        try:
+            from .v3_extension import comfy_entrypoint as _comfy_entrypoint
+        except ImportError:
+            from v3_extension import comfy_entrypoint as _comfy_entrypoint
+    except ModuleNotFoundError as exc:
+        if exc.name and exc.name.startswith("comfy_api"):
+            raise RuntimeError(
+                "ComfyUI_Burve_Tools 2.0.0 requires a DynamicCombo-capable ComfyUI build "
+                "with comfy_api.latest available."
+            ) from exc
+        if exc.name and exc.name.startswith("google.genai"):
+            raise RuntimeError(
+                "ComfyUI_Burve_Tools 2.0.0 requires google-genai>=1.68.0,<2."
+            ) from exc
+        raise
 
-NODE_CLASS_MAPPINGS = {
-    "BurveGoogleImageGen": BurveGoogleImageGen,
-    "BurveVertexImageGen": BurveVertexImageGen,
-    "BurveImageRefPack": BurveImageRefPack,
-    "BurveCharacterPlanner": BurveCharacterPlanner,
-    "BurveCharacterRaceDetails": BurveCharacterRaceDetails,
-    "BurveDebugGeminiKey": BurveDebugGeminiKey,
-    "BurveDebugVertexAuth": BurveDebugVertexAuth,
-    "BurveSystemInstructions": BurveSystemInstructions,
-    "BurveVariableInjector": BurveVariableInjector,
-    "BurvePromptDatabase": BurvePromptDatabase,
-    "BurveBlindGridSplitter": BurveBlindGridSplitter,
-    "BurvePromptSelector14": BurvePromptSelector14,
-}
+    return await _comfy_entrypoint()
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "BurveGoogleImageGen": "Burve Google Image Gen",
-    "BurveVertexImageGen": "Burve Google Image Gen (Vertex AI)",
-    "BurveImageRefPack": "Burve Image Reference Pack",
-    "BurveCharacterPlanner": "Burve Character Planner",
-    "BurveCharacterRaceDetails": "Burve Character Race Details",
-    "BurveDebugGeminiKey": "Burve Debug Gemini Key",
-    "BurveDebugVertexAuth": "Burve Debug Vertex Auth",
-    "BurveSystemInstructions": "Burve System Instructions",
-    "BurveVariableInjector": "Burve Variable Injector",
-    "BurvePromptDatabase": "Burve Prompt Database",
-    "BurveBlindGridSplitter": "Burve Blind Grid Splitter",
-    "BurvePromptSelector14": "Burve Prompt Selector 14",
-}
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["comfy_entrypoint"]
