@@ -59,6 +59,10 @@ class PreparedGeminiRequest:
     preflight_messages: tuple[str, ...]
 
 
+class GeminiAspectRatioCompatibilityError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class ParsedGeminiResponse:
     image_batch: torch.Tensor
@@ -172,7 +176,7 @@ def ensure_google_genai_compatibility() -> None:
         if missing_symbols:
             details.append(f"missing symbols: {', '.join(missing_symbols)}")
         raise RuntimeError(
-            "ComfyUI_Burve_Tools 2.0.0 requires google-genai>=1.68.0,<2 for the "
+            "ComfyUI_Burve_Tools 2.1.0 requires google-genai>=1.68.0,<2 for the "
             "Gemini DynamicCombo nodes.\n" + "\n".join(details)
         )
 
@@ -256,6 +260,43 @@ def normalize_model_selection(model: Any) -> NormalizedModelSelection:
     )
 
 
+def resolve_model_selection_with_aspect_ratio_override(
+    model: Any,
+    aspect_ratio_override: Any = "",
+) -> NormalizedModelSelection:
+    selection = normalize_model_selection(model)
+
+    if aspect_ratio_override is None:
+        return selection
+    if not isinstance(aspect_ratio_override, str):
+        raise GeminiAspectRatioCompatibilityError("aspect_ratio_override must be a string.")
+
+    normalized_override = aspect_ratio_override.strip()
+    if not normalized_override:
+        return selection
+
+    spec = get_model_spec(selection.model_id)
+    aspect_ratio_field = next((field for field in spec.fields if field.key == "aspect_ratio"), None)
+    if aspect_ratio_field is None:
+        raise GeminiAspectRatioCompatibilityError(
+            f"Selected model {selection.model_id} does not support aspect_ratio '{normalized_override}'."
+        )
+
+    if normalized_override not in aspect_ratio_field.options:
+        supported_values = ", ".join(aspect_ratio_field.options)
+        raise GeminiAspectRatioCompatibilityError(
+            f"Selected model {selection.model_id} does not support aspect_ratio "
+            f"'{normalized_override}'. Supported values: {supported_values}."
+        )
+
+    resolved_values = dict(selection.values)
+    resolved_values["aspect_ratio"] = normalized_override
+    return NormalizedModelSelection(
+        model_id=selection.model_id,
+        values=MappingProxyType(resolved_values),
+    )
+
+
 def prepare_generate_content_request(
     *,
     provider_id: str,
@@ -264,8 +305,12 @@ def prepare_generate_content_request(
     seed: int,
     system_instructions: str = "",
     reference_images: Any = None,
+    aspect_ratio_override: Any = "",
 ) -> PreparedGeminiRequest:
-    selection = normalize_model_selection(model)
+    selection = resolve_model_selection_with_aspect_ratio_override(
+        model,
+        aspect_ratio_override=aspect_ratio_override,
+    )
     spec = get_model_spec(selection.model_id)
     preflight_messages: list[str] = []
 

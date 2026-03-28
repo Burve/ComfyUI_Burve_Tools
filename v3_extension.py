@@ -17,6 +17,8 @@ try:
         BurveBlindGridSplitter,
         BurveCharacterPlanner,
         BurveCharacterRaceDetails,
+        BurveCropMaskApply,
+        BurveCropMaskLoad,
         BurveDebugGeminiKey,
         BurveDebugVertexAuth,
         BurveGoogleImageGen,
@@ -41,6 +43,8 @@ except ImportError:
         BurveBlindGridSplitter,
         BurveCharacterPlanner,
         BurveCharacterRaceDetails,
+        BurveCropMaskApply,
+        BurveCropMaskLoad,
         BurveDebugGeminiKey,
         BurveDebugVertexAuth,
         BurveGoogleImageGen,
@@ -59,6 +63,8 @@ NODE_DEFINITIONS = (
     ("BurveGoogleImageGen", "Burve Google Image Gen", BurveGoogleImageGen),
     ("BurveVertexImageGen", "Burve Google Image Gen (Vertex AI)", BurveVertexImageGen),
     ("BurveImageRefPack", "Burve Image Reference Pack", BurveImageRefPack),
+    ("BurveCropMaskLoad", "Burve Crop + Mask Load", BurveCropMaskLoad),
+    ("BurveCropMaskApply", "Burve Crop + Mask Apply", BurveCropMaskApply),
     ("BurveImageInfo", "Burve Image Info", BurveImageInfo),
     ("BurveSaveGeneratedImage", "Burve Save Generated Image", BurveSaveGeneratedImage),
     ("BurveCharacterPlanner", "Burve Character Planner", BurveCharacterPlanner),
@@ -85,7 +91,7 @@ BUILTIN_IO_TYPES = {
 def ensure_dynamic_combo_support() -> None:
     if not hasattr(IO, "DynamicCombo") or not hasattr(IO.DynamicCombo, "Input"):
         raise RuntimeError(
-            "ComfyUI_Burve_Tools 2.0.0 requires a DynamicCombo-capable ComfyUI build "
+            "ComfyUI_Burve_Tools 2.1.0 requires a DynamicCombo-capable ComfyUI build "
             "with comfy_api.latest.IO.DynamicCombo.Input available."
         )
 
@@ -316,6 +322,13 @@ def _gemini_inputs():
         IO.String.Input("system_instructions", multiline=True, default="", optional=True),
         IO.Custom("IMAGE_LIST").Input("reference_images", optional=True),
         IO.Custom("CHARACTER_GEN_PIPE").Input("character_pipe", optional=True),
+        IO.String.Input(
+            "aspect_ratio_override",
+            default="",
+            multiline=False,
+            optional=True,
+            tooltip="Optional override for the selected model's aspect_ratio. Connect Burve Crop + Mask Load here.",
+        ),
         IO.Int.Input(
             "request_timeout_seconds",
             default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
@@ -357,6 +370,7 @@ class BurveGoogleImageGenV3(IO.ComfyNode):
         system_instructions="",
         reference_images=None,
         character_pipe=None,
+        aspect_ratio_override="",
         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         retry_attempts=DEFAULT_RETRY_ATTEMPTS,
     ):
@@ -369,6 +383,7 @@ class BurveGoogleImageGenV3(IO.ComfyNode):
                 system_instructions=system_instructions,
                 reference_images=reference_images,
                 character_pipe=character_pipe,
+                aspect_ratio_override=aspect_ratio_override,
                 request_timeout_seconds=request_timeout_seconds,
                 retry_attempts=retry_attempts,
             )
@@ -395,6 +410,7 @@ class BurveVertexImageGenV3(IO.ComfyNode):
         system_instructions="",
         reference_images=None,
         character_pipe=None,
+        aspect_ratio_override="",
         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         retry_attempts=DEFAULT_RETRY_ATTEMPTS,
     ):
@@ -407,6 +423,7 @@ class BurveVertexImageGenV3(IO.ComfyNode):
                 system_instructions=system_instructions,
                 reference_images=reference_images,
                 character_pipe=character_pipe,
+                aspect_ratio_override=aspect_ratio_override,
                 request_timeout_seconds=request_timeout_seconds,
                 retry_attempts=retry_attempts,
             )

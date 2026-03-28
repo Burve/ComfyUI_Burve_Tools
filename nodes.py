@@ -1,3 +1,4 @@
+import hashlib
 import math
 import json
 import os
@@ -5,10 +6,12 @@ import random
 import ssl
 import time
 import urllib.request
+from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image
+import torch.nn.functional as F
+from PIL import Image, ImageOps
 try:
     from PIL.PngImagePlugin import PngInfo
 except ImportError:
@@ -37,6 +40,7 @@ try:
         blank_image_tensor,
         clone_config_with_http_timeout,
         ensure_default_text,
+        GeminiAspectRatioCompatibilityError,
         parse_generate_content_response,
         prepare_generate_content_request,
     )
@@ -56,6 +60,7 @@ except ImportError:
         blank_image_tensor,
         clone_config_with_http_timeout,
         ensure_default_text,
+        GeminiAspectRatioCompatibilityError,
         parse_generate_content_response,
         prepare_generate_content_request,
     )
@@ -82,9 +87,23 @@ CHARACTER_GEN_PIPE_KIND = "burve.character_gen_pipe"
 CHARACTER_GEN_PIPE_VERSION = 1
 GENERATED_IMAGE_PIPE_KIND = "burve.generated_image_pipe"
 GENERATED_IMAGE_PIPE_VERSION = 1
+CROP_REGION_PIPE_KIND = "burve.crop_region_pipe"
+CROP_REGION_PIPE_VERSION = 1
 CHARACTER_PIPE_OVERRIDE_NOTE = (
     "character_pipe is connected; ignoring direct prompt, system_instructions, and "
     "reference_images inputs."
+)
+BURVE_CROP_MASK_ASPECT_RATIOS = (
+    "1:1",
+    "3:2",
+    "2:3",
+    "3:4",
+    "4:3",
+    "4:5",
+    "5:4",
+    "9:16",
+    "16:9",
+    "21:9",
 )
 RACE_OPTIONS = [
     "human",
@@ -187,6 +206,7 @@ class BurveGoogleImageGenBase:
                 "system_instructions": ("STRING", {"multiline": True, "default": ""}),
                 "reference_images": ("IMAGE_LIST",),
                 "character_pipe": ("CHARACTER_GEN_PIPE",),
+                "aspect_ratio_override": ("STRING", {"multiline": False, "default": ""}),
                 "request_timeout_seconds": (
                     "INT",
                     {
@@ -656,6 +676,7 @@ class BurveGoogleImageGenBase:
         system_instructions="",
         reference_images=None,
         character_pipe=None,
+        aspect_ratio_override="",
         request_timeout_seconds=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         retry_attempts=DEFAULT_RETRY_ATTEMPTS,
     ):
@@ -678,6 +699,21 @@ class BurveGoogleImageGenBase:
         character_pipe_connected = resolved_inputs["character_pipe_connected"]
         ignored_direct_inputs = resolved_inputs["ignored_direct_inputs"]
 
+        try:
+            prepare_generate_content_request(
+                provider_id=self.PROVIDER_ID,
+                prompt=prompt,
+                model=model,
+                seed=seed,
+                system_instructions=system_instructions,
+                reference_images=reference_images,
+                aspect_ratio_override=aspect_ratio_override,
+            )
+        except GeminiAspectRatioCompatibilityError:
+            raise
+        except ValueError as e:
+            return self._blank_result(str(e))
+
         auth_error = self._get_provider_auth_error()
         if auth_error is not None:
             return self._blank_result(
@@ -698,6 +734,7 @@ class BurveGoogleImageGenBase:
                 seed=seed,
                 system_instructions=system_instructions,
                 reference_images=reference_images,
+                aspect_ratio_override=aspect_ratio_override,
             )
             model_id_for_error = request.model_id
             response = self._request_generate_content(
@@ -978,6 +1015,8 @@ class BurveGoogleImageGenBase:
                 system_messages,
             )
 
+        except GeminiAspectRatioCompatibilityError:
+            raise
         except Exception as e:
             return self._blank_result(
                 self._append_planner_summary(
@@ -1831,6 +1870,671 @@ class BurvePromptDatabase:
 
         # compiled, raw, and the plain title
         return (compiled_prompt, raw_prompt, raw_title)
+
+
+class BurveCropMaskLoad:
+    DEFAULT_BRUSH_RADIUS_PX = 48.0
+    DEFAULT_BRUSH_SOFTNESS = 0.35
+    DEFAULT_BRUSH_OPACITY = 1.0
+    STATE_VERSION = 1
+    SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": (cls._input_image_options(),),
+                "aspect_ratio": (list(BURVE_CROP_MASK_ASPECT_RATIOS), {"default": "1:1"}),
+            },
+            "optional": {
+                "editor_state_json": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "advanced": True,
+                        "tooltip": "Internal editor state used by the custom crop/mask UI.",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "STRING", "CROP_REGION_PIPE")
+    RETURN_NAMES = ("image", "cut_image", "image_mask", "aspect_ratio", "crop_region_pipe")
+    FUNCTION = "load"
+    CATEGORY = "BurveTools/Image"
+
+    @classmethod
+    def _get_input_directory(cls):
+        if folder_paths is not None and hasattr(folder_paths, "get_input_directory"):
+            return folder_paths.get_input_directory()
+        return os.path.join(os.path.dirname(__file__), "input")
+
+    @classmethod
+    def _input_image_options(cls):
+        images = cls._list_input_images()
+        return images or [""]
+
+    @classmethod
+    def _list_input_images(cls):
+        if folder_paths is not None and hasattr(folder_paths, "get_filename_list"):
+            try:
+                filenames = folder_paths.get_filename_list("input")
+                if filenames:
+                    return sorted(filenames)
+            except Exception:
+                pass
+
+        input_dir = cls._get_input_directory()
+        if not os.path.isdir(input_dir):
+            return []
+
+        discovered = []
+        for root, _, files in os.walk(input_dir):
+            for filename in files:
+                if os.path.splitext(filename)[1].lower() not in cls.SUPPORTED_IMAGE_EXTENSIONS:
+                    continue
+                full_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(full_path, input_dir)
+                discovered.append(rel_path.replace("\\", "/"))
+        return sorted(discovered)
+
+    @classmethod
+    def _sanitize_relative_input_path(cls, image):
+        if not isinstance(image, str) or not image.strip():
+            raise ValueError("image must be a non-empty string.")
+        normalized = image.replace("\\", "/").strip().lstrip("/")
+        candidate = os.path.normpath(os.path.join(cls._get_input_directory(), normalized))
+        input_dir = os.path.abspath(cls._get_input_directory())
+        abs_candidate = os.path.abspath(candidate)
+        if os.path.commonpath([input_dir, abs_candidate]) != input_dir:
+            raise ValueError("image path escapes the input directory.")
+        return abs_candidate
+
+    @classmethod
+    def _get_annotated_filepath(cls, image):
+        if folder_paths is not None and hasattr(folder_paths, "get_annotated_filepath"):
+            return folder_paths.get_annotated_filepath(image)
+        return cls._sanitize_relative_input_path(image)
+
+    @classmethod
+    def _exists_annotated_filepath(cls, image):
+        if folder_paths is not None and hasattr(folder_paths, "exists_annotated_filepath"):
+            return folder_paths.exists_annotated_filepath(image)
+        try:
+            return os.path.isfile(cls._get_annotated_filepath(image))
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _parse_aspect_ratio(aspect_ratio):
+        if not isinstance(aspect_ratio, str) or ":" not in aspect_ratio:
+            raise ValueError("aspect_ratio must be in W:H format.")
+        left, right = aspect_ratio.split(":", 1)
+        width = int(left)
+        height = int(right)
+        if width < 1 or height < 1:
+            raise ValueError("aspect_ratio must use positive integers.")
+        return width, height
+
+    @classmethod
+    def _default_crop_rect(cls, image_width, image_height, aspect_ratio):
+        ratio_w, ratio_h = cls._parse_aspect_ratio(aspect_ratio)
+        if image_width * ratio_h >= image_height * ratio_w:
+            crop_height = image_height
+            crop_width = max(1, int(round(crop_height * ratio_w / ratio_h)))
+        else:
+            crop_width = image_width
+            crop_height = max(1, int(round(crop_width * ratio_h / ratio_w)))
+
+        crop_width = min(crop_width, image_width)
+        crop_height = min(crop_height, image_height)
+        x = max((image_width - crop_width) // 2, 0)
+        y = max((image_height - crop_height) // 2, 0)
+        return {"x": x, "y": y, "width": crop_width, "height": crop_height}
+
+    @classmethod
+    def _ratio_matches(cls, crop, aspect_ratio, tolerance_px=1.0):
+        ratio_w, ratio_h = cls._parse_aspect_ratio(aspect_ratio)
+        width = float(crop["width"])
+        height = float(crop["height"])
+        return abs((width * ratio_h) - (height * ratio_w)) <= max(float(ratio_w), float(ratio_h), tolerance_px)
+
+    @classmethod
+    def _fit_crop_rect(cls, crop, image_width, image_height, aspect_ratio):
+        ratio_w, ratio_h = cls._parse_aspect_ratio(aspect_ratio)
+        center_x = float(crop.get("x", 0)) + (float(crop.get("width", image_width)) / 2.0)
+        center_y = float(crop.get("y", 0)) + (float(crop.get("height", image_height)) / 2.0)
+
+        if image_width * ratio_h >= image_height * ratio_w:
+            max_width = image_height * ratio_w / ratio_h
+            max_height = image_height
+        else:
+            max_width = image_width
+            max_height = image_width * ratio_h / ratio_w
+
+        target_width = max(1.0, min(float(crop.get("width", max_width)), float(max_width)))
+        target_height = target_width * ratio_h / ratio_w
+        if target_height > max_height:
+            target_height = float(max_height)
+            target_width = target_height * ratio_w / ratio_h
+
+        x = center_x - (target_width / 2.0)
+        y = center_y - (target_height / 2.0)
+        x = min(max(x, 0.0), max(image_width - target_width, 0.0))
+        y = min(max(y, 0.0), max(image_height - target_height, 0.0))
+
+        result = {
+            "x": int(round(x)),
+            "y": int(round(y)),
+            "width": max(1, int(round(target_width))),
+            "height": max(1, int(round(target_height))),
+        }
+
+        if result["x"] + result["width"] > image_width:
+            result["width"] = image_width - result["x"]
+        if result["y"] + result["height"] > image_height:
+            result["height"] = image_height - result["y"]
+
+        if not cls._ratio_matches(result, aspect_ratio):
+            return cls._default_crop_rect(image_width, image_height, aspect_ratio)
+        return result
+
+    @staticmethod
+    def _default_viewport():
+        return {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0}
+
+    @classmethod
+    def _default_brush(cls):
+        return {
+            "radius_px": cls.DEFAULT_BRUSH_RADIUS_PX,
+            "softness": cls.DEFAULT_BRUSH_SOFTNESS,
+            "opacity": cls.DEFAULT_BRUSH_OPACITY,
+            "mode": "paint",
+        }
+
+    @classmethod
+    def _default_editor_state(cls, image, image_width, image_height, aspect_ratio):
+        return {
+            "version": cls.STATE_VERSION,
+            "image_name": image,
+            "source_size": {"width": image_width, "height": image_height},
+            "aspect_ratio": aspect_ratio,
+            "crop": cls._default_crop_rect(image_width, image_height, aspect_ratio),
+            "viewport": cls._default_viewport(),
+            "brush": cls._default_brush(),
+            "strokes": [],
+        }
+
+    @classmethod
+    def _parse_editor_state_json(cls, editor_state_json):
+        if editor_state_json is None or editor_state_json == "":
+            return None
+        if not isinstance(editor_state_json, str):
+            raise ValueError("editor_state_json must be a string.")
+        try:
+            payload = json.loads(editor_state_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("editor_state_json must be valid JSON.") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("editor_state_json must decode to an object.")
+        version = int(payload.get("version", cls.STATE_VERSION))
+        if version != cls.STATE_VERSION:
+            raise ValueError("editor_state_json version is unsupported.")
+        return payload
+
+    @staticmethod
+    def _coerce_float(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    @classmethod
+    def _normalize_brush(cls, brush):
+        brush = brush or {}
+        mode = str(brush.get("mode", "paint")).lower()
+        if mode not in {"paint", "erase"}:
+            mode = "paint"
+        return {
+            "radius_px": max(1.0, cls._coerce_float(brush.get("radius_px"), cls.DEFAULT_BRUSH_RADIUS_PX)),
+            "softness": min(max(cls._coerce_float(brush.get("softness"), cls.DEFAULT_BRUSH_SOFTNESS), 0.0), 1.0),
+            "opacity": min(max(cls._coerce_float(brush.get("opacity"), cls.DEFAULT_BRUSH_OPACITY), 0.0), 1.0),
+            "mode": mode,
+        }
+
+    @classmethod
+    def _normalize_points(cls, points):
+        if not isinstance(points, list):
+            raise ValueError("stroke points must be a list.")
+        normalized = []
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                raise ValueError("each stroke point must be a [x, y] pair.")
+            normalized.append([cls._coerce_float(point[0], 0.0), cls._coerce_float(point[1], 0.0)])
+        if not normalized:
+            raise ValueError("stroke must contain at least one point.")
+        return normalized
+
+    @classmethod
+    def _normalize_strokes(cls, strokes):
+        if strokes is None:
+            return []
+        if not isinstance(strokes, list):
+            raise ValueError("strokes must be a list.")
+        normalized = []
+        for stroke in strokes:
+            if not isinstance(stroke, dict):
+                raise ValueError("each stroke must be an object.")
+            brush = cls._normalize_brush(stroke)
+            normalized.append(
+                {
+                    "mode": brush["mode"],
+                    "radius_px": brush["radius_px"],
+                    "softness": brush["softness"],
+                    "opacity": brush["opacity"],
+                    "points": cls._normalize_points(stroke.get("points", [])),
+                }
+            )
+        return normalized
+
+    @classmethod
+    def _reconcile_editor_state(cls, image, image_width, image_height, aspect_ratio, editor_state_json=""):
+        parsed = cls._parse_editor_state_json(editor_state_json)
+        if parsed is None:
+            return cls._default_editor_state(image, image_width, image_height, aspect_ratio)
+
+        source_size = parsed.get("source_size", {})
+        source_width = int(source_size.get("width", 0) or 0)
+        source_height = int(source_size.get("height", 0) or 0)
+        state_image = parsed.get("image_name")
+        if (
+            state_image != image
+            or source_width != image_width
+            or source_height != image_height
+        ):
+            return cls._default_editor_state(image, image_width, image_height, aspect_ratio)
+
+        crop = parsed.get("crop")
+        if not isinstance(crop, dict):
+            raise ValueError("editor_state_json crop must be an object.")
+        normalized_crop = {
+            "x": int(round(cls._coerce_float(crop.get("x"), 0))),
+            "y": int(round(cls._coerce_float(crop.get("y"), 0))),
+            "width": int(round(cls._coerce_float(crop.get("width"), image_width))),
+            "height": int(round(cls._coerce_float(crop.get("height"), image_height))),
+        }
+        normalized_crop = cls._fit_crop_rect(normalized_crop, image_width, image_height, aspect_ratio)
+
+        viewport = parsed.get("viewport") or {}
+        brush = cls._normalize_brush(parsed.get("brush"))
+        strokes = cls._normalize_strokes(parsed.get("strokes"))
+
+        return {
+            "version": cls.STATE_VERSION,
+            "image_name": image,
+            "source_size": {"width": image_width, "height": image_height},
+            "aspect_ratio": aspect_ratio,
+            "crop": normalized_crop,
+            "viewport": {
+                "zoom": max(cls._coerce_float(viewport.get("zoom"), 1.0), 0.1),
+                "pan_x": cls._coerce_float(viewport.get("pan_x"), 0.0),
+                "pan_y": cls._coerce_float(viewport.get("pan_y"), 0.0),
+            },
+            "brush": brush,
+            "strokes": strokes,
+        }
+
+    @classmethod
+    def _validate_crop_rect(cls, crop, image_width, image_height, aspect_ratio):
+        if crop["width"] < 1 or crop["height"] < 1:
+            raise ValueError("crop dimensions must be positive.")
+        if crop["x"] < 0 or crop["y"] < 0:
+            raise ValueError("crop origin must be inside the image.")
+        if crop["x"] + crop["width"] > image_width or crop["y"] + crop["height"] > image_height:
+            raise ValueError("crop must stay inside the source image.")
+        if not cls._ratio_matches(crop, aspect_ratio):
+            raise ValueError("crop does not match the selected aspect ratio.")
+
+    @classmethod
+    def _load_source_image(cls, image):
+        image_path = cls._get_annotated_filepath(image)
+        with Image.open(image_path) as pil_image:
+            rgb_image = ImageOps.exif_transpose(pil_image).convert("RGB")
+        return rgb_image
+
+    @staticmethod
+    def _pil_to_image_tensor(pil_image):
+        image_np = np.array(pil_image).astype(np.float32) / 255.0
+        if image_np.ndim == 2:
+            image_np = np.stack([image_np] * 3, axis=-1)
+        return torch.from_numpy(image_np).unsqueeze(0)
+
+    @staticmethod
+    def _mask_to_tensor(mask_array):
+        return torch.from_numpy(mask_array.astype(np.float32)).unsqueeze(0)
+
+    @classmethod
+    def _render_mask_strokes(cls, image_width, image_height, crop, strokes):
+        mask = np.zeros((image_height, image_width), dtype=np.float32)
+        if not strokes:
+            return mask
+
+        crop_left = int(crop["x"])
+        crop_top = int(crop["y"])
+        crop_right = crop_left + int(crop["width"])
+        crop_bottom = crop_top + int(crop["height"])
+
+        for stroke in strokes:
+            points = stroke["points"]
+            radius = max(float(stroke["radius_px"]), 1.0)
+            softness = min(max(float(stroke["softness"]), 0.0), 1.0)
+            opacity = min(max(float(stroke["opacity"]), 0.0), 1.0)
+            mode = stroke["mode"]
+
+            if len(points) == 1:
+                cls._apply_brush_dab(
+                    mask,
+                    points[0][0],
+                    points[0][1],
+                    radius,
+                    softness,
+                    opacity,
+                    mode,
+                    crop_left,
+                    crop_top,
+                    crop_right,
+                    crop_bottom,
+                )
+                continue
+
+            step = max(radius * 0.25, 1.0)
+            for start, end in zip(points, points[1:]):
+                dx = end[0] - start[0]
+                dy = end[1] - start[1]
+                distance = math.hypot(dx, dy)
+                if distance <= 0.0:
+                    cls._apply_brush_dab(
+                        mask,
+                        start[0],
+                        start[1],
+                        radius,
+                        softness,
+                        opacity,
+                        mode,
+                        crop_left,
+                        crop_top,
+                        crop_right,
+                        crop_bottom,
+                    )
+                    continue
+                steps = max(int(math.ceil(distance / step)), 1)
+                for index in range(steps + 1):
+                    t = index / steps
+                    x = start[0] + (dx * t)
+                    y = start[1] + (dy * t)
+                    cls._apply_brush_dab(
+                        mask,
+                        x,
+                        y,
+                        radius,
+                        softness,
+                        opacity,
+                        mode,
+                        crop_left,
+                        crop_top,
+                        crop_right,
+                        crop_bottom,
+                    )
+
+        return mask
+
+    @staticmethod
+    def _apply_brush_dab(
+        mask,
+        center_x,
+        center_y,
+        radius,
+        softness,
+        opacity,
+        mode,
+        crop_left,
+        crop_top,
+        crop_right,
+        crop_bottom,
+    ):
+        left = max(int(math.floor(center_x - radius)), crop_left)
+        top = max(int(math.floor(center_y - radius)), crop_top)
+        right = min(int(math.ceil(center_x + radius)) + 1, crop_right)
+        bottom = min(int(math.ceil(center_y + radius)) + 1, crop_bottom)
+        if left >= right or top >= bottom:
+            return
+
+        ys, xs = np.ogrid[top:bottom, left:right]
+        distances = np.sqrt((xs - center_x) ** 2 + (ys - center_y) ** 2)
+        alpha = np.zeros((bottom - top, right - left), dtype=np.float32)
+        if softness <= 0.0:
+            alpha[distances <= radius] = opacity
+        else:
+            core_radius = radius * max(0.0, 1.0 - softness)
+            if core_radius > 0.0:
+                alpha[distances <= core_radius] = opacity
+            feather = max(radius - core_radius, 1e-6)
+            falloff_mask = (distances > core_radius) & (distances <= radius)
+            if np.any(falloff_mask):
+                normalized = 1.0 - ((distances[falloff_mask] - core_radius) / feather)
+                alpha[falloff_mask] = opacity * np.clip(normalized ** 2, 0.0, 1.0)
+
+        if mode == "erase":
+            mask[top:bottom, left:right] *= (1.0 - alpha)
+        else:
+            mask[top:bottom, left:right] = np.maximum(mask[top:bottom, left:right], alpha)
+
+    @classmethod
+    def _build_crop_region_pipe(cls, image_width, image_height, aspect_ratio, crop):
+        return {
+            "kind": CROP_REGION_PIPE_KIND,
+            "version": CROP_REGION_PIPE_VERSION,
+            "source_width": int(image_width),
+            "source_height": int(image_height),
+            "aspect_ratio": aspect_ratio,
+            "crop": {
+                "x": int(crop["x"]),
+                "y": int(crop["y"]),
+                "width": int(crop["width"]),
+                "height": int(crop["height"]),
+            },
+        }
+
+    @classmethod
+    def _normalize_crop_region_pipe(cls, crop_region_pipe):
+        if crop_region_pipe is None:
+            return None
+        if not isinstance(crop_region_pipe, dict):
+            raise ValueError("Invalid crop_region_pipe: expected a dict payload.")
+        if crop_region_pipe.get("kind") != CROP_REGION_PIPE_KIND:
+            raise ValueError("Invalid crop_region_pipe: unexpected kind.")
+        if crop_region_pipe.get("version") != CROP_REGION_PIPE_VERSION:
+            raise ValueError("Invalid crop_region_pipe: unsupported version.")
+        crop = crop_region_pipe.get("crop")
+        if not isinstance(crop, dict):
+            raise ValueError("Invalid crop_region_pipe: crop must be a dict.")
+        return {
+            "kind": CROP_REGION_PIPE_KIND,
+            "version": CROP_REGION_PIPE_VERSION,
+            "source_width": int(crop_region_pipe.get("source_width", 0)),
+            "source_height": int(crop_region_pipe.get("source_height", 0)),
+            "aspect_ratio": str(crop_region_pipe.get("aspect_ratio", "")),
+            "crop": {
+                "x": int(crop.get("x", 0)),
+                "y": int(crop.get("y", 0)),
+                "width": int(crop.get("width", 0)),
+                "height": int(crop.get("height", 0)),
+            },
+        }
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, image, aspect_ratio, editor_state_json="", **kwargs):
+        if aspect_ratio not in BURVE_CROP_MASK_ASPECT_RATIOS:
+            return "aspect_ratio must be one of the supported Burve crop ratios."
+        if not cls._exists_annotated_filepath(image):
+            return f"Input image not found: {image}"
+        try:
+            pil_image = cls._load_source_image(image)
+            image_width, image_height = pil_image.size
+            parsed = cls._parse_editor_state_json(editor_state_json)
+            if parsed is not None:
+                source_size = parsed.get("source_size", {})
+                if (
+                    parsed.get("image_name") == image
+                    and int(source_size.get("width", 0) or 0) == image_width
+                    and int(source_size.get("height", 0) or 0) == image_height
+                ):
+                    crop = parsed.get("crop")
+                    if not isinstance(crop, dict):
+                        raise ValueError("editor_state_json crop must be an object.")
+                    raw_crop = {
+                        "x": int(round(cls._coerce_float(crop.get("x"), 0))),
+                        "y": int(round(cls._coerce_float(crop.get("y"), 0))),
+                        "width": int(round(cls._coerce_float(crop.get("width"), image_width))),
+                        "height": int(round(cls._coerce_float(crop.get("height"), image_height))),
+                    }
+                    cls._validate_crop_rect(raw_crop, image_width, image_height, aspect_ratio)
+                    cls._normalize_strokes(parsed.get("strokes"))
+            state = cls._reconcile_editor_state(image, image_width, image_height, aspect_ratio, editor_state_json)
+            cls._validate_crop_rect(state["crop"], image_width, image_height, aspect_ratio)
+        except ValueError as exc:
+            return str(exc)
+        return True
+
+    @classmethod
+    def IS_CHANGED(cls, image, aspect_ratio, editor_state_json="", **kwargs):
+        image_path = cls._get_annotated_filepath(image)
+        hasher = hashlib.sha256()
+        with open(image_path, "rb") as handle:
+            hasher.update(handle.read())
+        hasher.update(aspect_ratio.encode("utf-8"))
+        hasher.update(str(editor_state_json or "").encode("utf-8"))
+        return hasher.hexdigest()
+
+    def load(self, image, aspect_ratio, editor_state_json=""):
+        pil_image = self._load_source_image(image)
+        image_width, image_height = pil_image.size
+        state = self._reconcile_editor_state(image, image_width, image_height, aspect_ratio, editor_state_json)
+        self._validate_crop_rect(state["crop"], image_width, image_height, aspect_ratio)
+
+        crop = state["crop"]
+        crop_box = (
+            int(crop["x"]),
+            int(crop["y"]),
+            int(crop["x"] + crop["width"]),
+            int(crop["y"] + crop["height"]),
+        )
+        cropped_image = pil_image.crop(crop_box)
+        image_mask = self._render_mask_strokes(image_width, image_height, crop, state["strokes"])
+        crop_region_pipe = self._build_crop_region_pipe(image_width, image_height, aspect_ratio, crop)
+
+        return (
+            self._pil_to_image_tensor(pil_image),
+            self._pil_to_image_tensor(cropped_image),
+            self._mask_to_tensor(image_mask),
+            aspect_ratio,
+            crop_region_pipe,
+        )
+
+
+class BurveCropMaskApply:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "base_image": ("IMAGE",),
+                "new_image": ("IMAGE",),
+                "crop_region_pipe": ("CROP_REGION_PIPE",),
+                "mask": ("MASK",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("edited_image", "placed_image_white_bg", "masked_placed_image_white_bg")
+    FUNCTION = "apply"
+    CATEGORY = "BurveTools/Image"
+
+    @staticmethod
+    def _require_single_image_tensor(name, image):
+        shape = getattr(image, "shape", None)
+        if shape is None or len(shape) != 4:
+            raise ValueError(f"[BurveCropMaskApply] {name} must be an IMAGE tensor with shape (B, H, W, C).")
+        if int(shape[0]) != 1:
+            raise ValueError(f"[BurveCropMaskApply] {name} must have batch size 1.")
+        if int(shape[1]) < 1 or int(shape[2]) < 1:
+            raise ValueError(f"[BurveCropMaskApply] {name} must have positive spatial dimensions.")
+        return int(shape[1]), int(shape[2])
+
+    @staticmethod
+    def _require_single_mask_tensor(mask):
+        shape = getattr(mask, "shape", None)
+        if shape is None or len(shape) != 3:
+            raise ValueError("[BurveCropMaskApply] mask must be a MASK tensor with shape (B, H, W).")
+        if int(shape[0]) != 1:
+            raise ValueError("[BurveCropMaskApply] mask must have batch size 1.")
+        if int(shape[1]) < 1 or int(shape[2]) < 1:
+            raise ValueError("[BurveCropMaskApply] mask must have positive spatial dimensions.")
+        return int(shape[1]), int(shape[2])
+
+    def apply(self, base_image, new_image, crop_region_pipe, mask):
+        base_height, base_width = self._require_single_image_tensor("base_image", base_image)
+        new_height, new_width = self._require_single_image_tensor("new_image", new_image)
+        mask_height, mask_width = self._require_single_mask_tensor(mask)
+
+        normalized_pipe = BurveCropMaskLoad._normalize_crop_region_pipe(crop_region_pipe)
+        BurveCropMaskLoad._validate_crop_rect(
+            normalized_pipe["crop"],
+            normalized_pipe["source_width"],
+            normalized_pipe["source_height"],
+            normalized_pipe["aspect_ratio"],
+        )
+
+        if normalized_pipe["source_width"] != base_width or normalized_pipe["source_height"] != base_height:
+            raise ValueError("[BurveCropMaskApply] crop_region_pipe source size must match base_image dimensions.")
+        if mask_height != base_height or mask_width != base_width:
+            raise ValueError("[BurveCropMaskApply] mask dimensions must match base_image dimensions.")
+        if not BurveCropMaskLoad._ratio_matches(
+            {"width": new_width, "height": new_height},
+            normalized_pipe["aspect_ratio"],
+        ):
+            raise ValueError("[BurveCropMaskApply] new_image aspect ratio must match crop_region_pipe aspect_ratio.")
+
+        base_image = base_image
+        new_image = new_image.to(device=base_image.device, dtype=base_image.dtype)
+        mask = mask.to(device=base_image.device, dtype=base_image.dtype)
+
+        crop = normalized_pipe["crop"]
+        crop_x = int(crop["x"])
+        crop_y = int(crop["y"])
+        crop_width = int(crop["width"])
+        crop_height = int(crop["height"])
+
+        resized_new_image = F.interpolate(
+            new_image.permute(0, 3, 1, 2),
+            size=(crop_height, crop_width),
+            mode="bilinear",
+            align_corners=False,
+        ).permute(0, 2, 3, 1)
+
+        white_canvas = torch.ones_like(base_image)
+        placed_image_white_bg = white_canvas.clone()
+        placed_image_white_bg[:, crop_y:crop_y + crop_height, crop_x:crop_x + crop_width, :] = resized_new_image
+
+        crop_gate = torch.zeros_like(mask)
+        crop_gate[:, crop_y:crop_y + crop_height, crop_x:crop_x + crop_width] = 1.0
+        effective_mask = torch.clamp(mask, 0.0, 1.0) * crop_gate
+        mask4d = effective_mask.unsqueeze(-1)
+
+        edited_image = base_image * (1.0 - mask4d) + placed_image_white_bg * mask4d
+        masked_placed_image_white_bg = white_canvas * (1.0 - mask4d) + placed_image_white_bg * mask4d
+        return (edited_image, placed_image_white_bg, masked_placed_image_white_bg)
+
 
 class BurveBlindGridSplitter:
     """

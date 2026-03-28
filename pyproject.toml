@@ -1,7 +1,7 @@
 [project]
 name = "burve_tools"
-description = "A collection of ComfyUI helper nodes with Gemini image generation for AI Studio and Vertex AI, plus adult character planning with age, gender, race, fantasy trait pipes, DynamicCombo model-specific controls, Google Search grounding, and thinking controls."
-version = "2.0.0"
+description = "A ComfyUI node pack for Gemini image generation on AI Studio and Vertex AI, crop-and-mask editing with aspect-ratio override workflows, character planning, prompt tools, and image utilities."
+version = "2.1.0"
 license = {file = "LICENSE"} 
 # classifiers = [
 #     # For OS-independent nodes (works on all operating systems)

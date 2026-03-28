@@ -56,6 +56,21 @@ def install_test_stubs():
         torch_stub.from_numpy = from_numpy
         torch_stub.is_tensor = is_tensor
         sys.modules["torch"] = torch_stub
+        torch_nn_stub = pytypes.ModuleType("torch.nn")
+        torch_nn_functional_stub = pytypes.ModuleType("torch.nn.functional")
+
+        def interpolate(tensor, size=None, mode=None, align_corners=None):
+            shape = list(tensor.shape)
+            if size is not None and len(shape) >= 4:
+                shape[-2] = size[0]
+                shape[-1] = size[1]
+            return Tensor(shape)
+
+        torch_nn_functional_stub.interpolate = interpolate
+        torch_nn_stub.functional = torch_nn_functional_stub
+        torch_stub.nn = torch_nn_stub
+        sys.modules["torch.nn"] = torch_nn_stub
+        sys.modules["torch.nn.functional"] = torch_nn_functional_stub
 
     try:
         import numpy as _numpy  # noqa: F401
@@ -312,12 +327,16 @@ BurveGoogleImageGen = nodes_module.BurveGoogleImageGen
 BurveVertexImageGen = nodes_module.BurveVertexImageGen
 BurveDebugGeminiKey = nodes_module.BurveDebugGeminiKey
 BurveDebugVertexAuth = nodes_module.BurveDebugVertexAuth
+BurveCropMaskLoad = nodes_module.BurveCropMaskLoad
+BurveCropMaskApply = nodes_module.BurveCropMaskApply
 BurveImageInfo = nodes_module.BurveImageInfo
 BurveSaveGeneratedImage = nodes_module.BurveSaveGeneratedImage
 CHARACTER_GEN_PIPE_KIND = nodes_module.CHARACTER_GEN_PIPE_KIND
 CHARACTER_GEN_PIPE_VERSION = nodes_module.CHARACTER_GEN_PIPE_VERSION
 GENERATED_IMAGE_PIPE_KIND = nodes_module.GENERATED_IMAGE_PIPE_KIND
 GENERATED_IMAGE_PIPE_VERSION = nodes_module.GENERATED_IMAGE_PIPE_VERSION
+CROP_REGION_PIPE_KIND = nodes_module.CROP_REGION_PIPE_KIND
+CROP_REGION_PIPE_VERSION = nodes_module.CROP_REGION_PIPE_VERSION
 CHARACTER_RACE_PIPE_KIND = nodes_module.CHARACTER_RACE_PIPE_KIND
 CHARACTER_RACE_PIPE_VERSION = nodes_module.CHARACTER_RACE_PIPE_VERSION
 from character_planner import build_character_plan, resolve_reference_manifest
@@ -994,6 +1013,57 @@ class SharedImageGenResolverTestMixin:
 
         self.assertEqual(fake_client.last_call["config"].response_modalities, ["TEXT", "IMAGE"])
 
+    def test_generate_image_applies_supported_aspect_ratio_override(self):
+        response = pytypes.SimpleNamespace(candidates=None, parts=[])
+        fake_client = self._FakeClient(response)
+
+        with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
+            with mock.patch.object(self.node, "_build_client", return_value=fake_client):
+                self.node.generate_image(
+                    prompt="prompt",
+                    model={
+                        "model": "gemini-3.1-flash-image-preview",
+                        "aspect_ratio": "1:1",
+                        "resolution": "1K",
+                        "search_mode": "off",
+                        "thinking_level": "MINIMAL",
+                        "include_thoughts": False,
+                        "output_mime_type": "image/png",
+                        "prominent_people": "allow",
+                    },
+                    aspect_ratio_override="16:9",
+                    seed=123,
+                    system_instructions="",
+                    reference_images=None,
+                    character_pipe=None,
+                )
+
+        self.assertEqual(fake_client.last_call["config"].image_config.aspect_ratio, "16:9")
+
+    def test_generate_image_rejects_unsupported_aspect_ratio_override_before_client_build(self):
+        with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
+            with mock.patch.object(self.node, "_build_client") as mock_build_client:
+                with self.assertRaisesRegex(
+                    gemini_service_module.GeminiAspectRatioCompatibilityError,
+                    "Selected model gemini-3-pro-image-preview does not support aspect_ratio '4:1'",
+                ):
+                    self.node.generate_image(
+                        prompt="prompt",
+                        model={
+                            "model": "gemini-3-pro-image-preview",
+                            "aspect_ratio": "1:1",
+                            "resolution": "1K",
+                            "search_mode": "off",
+                        },
+                        aspect_ratio_override="4:1",
+                        seed=123,
+                        system_instructions="",
+                        reference_images=None,
+                        character_pipe=None,
+                    )
+
+        mock_build_client.assert_not_called()
+
     def test_generate_image_surfaces_text_only_no_image_diagnostics(self):
         response = pytypes.SimpleNamespace(
             candidates=[
@@ -1354,6 +1424,40 @@ class GeminiImageServiceRequestBuilderTests(unittest.TestCase):
         self.assertTrue(request.config.thinking_config.include_thoughts)
         self.assertIsNotNone(request.config.tools[0].google_search.search_types.web_search)
         self.assertIsNotNone(request.config.tools[0].google_search.search_types.image_search)
+
+    def test_aspect_ratio_override_replaces_model_payload_value(self):
+        request = gemini_service_module.prepare_generate_content_request(
+            provider_id="vertex",
+            prompt="prompt",
+            model={
+                "model": "gemini-3-pro-image-preview",
+                "aspect_ratio": "1:1",
+                "resolution": "2K",
+                "search_mode": "web",
+            },
+            aspect_ratio_override="16:9",
+            seed=123,
+        )
+
+        self.assertEqual(request.config.image_config.aspect_ratio, "16:9")
+
+    def test_aspect_ratio_override_rejects_unsupported_ratio_for_selected_model(self):
+        with self.assertRaisesRegex(
+            gemini_service_module.GeminiAspectRatioCompatibilityError,
+            "Selected model gemini-3-pro-image-preview does not support aspect_ratio '4:1'",
+        ):
+            gemini_service_module.prepare_generate_content_request(
+                provider_id="vertex",
+                prompt="prompt",
+                model={
+                    "model": "gemini-3-pro-image-preview",
+                    "aspect_ratio": "1:1",
+                    "resolution": "2K",
+                    "search_mode": "web",
+                },
+                aspect_ratio_override="4:1",
+                seed=123,
+            )
 
     def test_reference_image_packing_limits_to_fourteen_images(self):
         class FakeImageArray:
@@ -1874,6 +1978,8 @@ class BurveV3ExtensionTests(unittest.TestCase):
         self.assertIn("BurveSaveGeneratedImage", node_map)
         self.assertIn("BurveDebugVertexAuth", node_map)
         self.assertIn("BurveCharacterPlanner", node_map)
+        self.assertIn("BurveCropMaskLoad", node_map)
+        self.assertIn("BurveCropMaskApply", node_map)
 
     def test_save_generated_image_schema_includes_hidden_prompt_metadata(self):
         node_map = self._get_node_map()
@@ -1918,6 +2024,7 @@ class BurveV3ExtensionTests(unittest.TestCase):
                     "system_instructions",
                     "reference_images",
                     "character_pipe",
+                    "aspect_ratio_override",
                     "request_timeout_seconds",
                     "retry_attempts",
                 ],
@@ -1931,6 +2038,7 @@ class BurveV3ExtensionTests(unittest.TestCase):
                     "system_instructions",
                     "reference_images",
                     "character_pipe",
+                    "aspect_ratio_override",
                     "request_timeout_seconds",
                     "retry_attempts",
                 ],
@@ -1938,6 +2046,7 @@ class BurveV3ExtensionTests(unittest.TestCase):
             self.assertIn("seed", v1_info["input"]["required"])
             self.assertIs(v1_info["input"]["required"]["seed"][1]["control_after_generate"], True)
             self.assertNotEqual(v1_info["input"]["required"]["seed"][1]["control_after_generate"], "randomize")
+            self.assertEqual(v1_info["input"]["optional"]["aspect_ratio_override"][0], "STRING")
             self.assertTrue(v1_info["input"]["optional"]["request_timeout_seconds"][1]["advanced"])
             self.assertTrue(v1_info["input"]["optional"]["retry_attempts"][1]["advanced"])
 
@@ -1990,6 +2099,8 @@ class BurveV3ExtensionTests(unittest.TestCase):
 
         for node_id in (
             "BurveImageRefPack",
+            "BurveCropMaskLoad",
+            "BurveCropMaskApply",
             "BurveImageInfo",
             "BurveSaveGeneratedImage",
             "BurveCharacterPlanner",
@@ -2027,6 +2138,41 @@ class BurveV3ExtensionTests(unittest.TestCase):
         self.assertIsNone(output.ui)
         self.assertEqual(output.result[1], 2)
         self.assertEqual(output.result[2], 2)
+
+    def test_crop_mask_load_schema_exposes_internal_state_and_pipe_output(self):
+        node_map = self._get_node_map()
+        schema = node_map["BurveCropMaskLoad"].define_schema()
+
+        self.assertEqual(
+            [item.id for item in schema.inputs],
+            ["image", "aspect_ratio", "editor_state_json"],
+        )
+        self.assertEqual(
+            [item.id for item in schema.outputs],
+            ["image", "cut_image", "image_mask", "aspect_ratio", "crop_region_pipe"],
+        )
+        self.assertEqual(schema.outputs[-1].io_type, "CROP_REGION_PIPE")
+
+        v1_info = schema.get_v1_info(include_hidden=False)
+        self.assertEqual(v1_info["input_order"]["required"], ["image", "aspect_ratio"])
+        self.assertEqual(v1_info["input_order"]["optional"], ["editor_state_json"])
+
+    def test_crop_mask_apply_schema_exposes_expected_inputs_and_outputs(self):
+        node_map = self._get_node_map()
+        schema = node_map["BurveCropMaskApply"].define_schema()
+
+        self.assertEqual(
+            [item.id for item in schema.inputs],
+            ["base_image", "new_image", "crop_region_pipe", "mask"],
+        )
+        self.assertEqual(
+            [item.id for item in schema.outputs],
+            ["edited_image", "placed_image_white_bg", "masked_placed_image_white_bg"],
+        )
+
+        v1_info = schema.get_v1_info(include_hidden=False)
+        self.assertEqual(v1_info["input_order"]["required"], ["base_image", "new_image", "crop_region_pipe", "mask"])
+        self.assertEqual(v1_info["input_order"]["optional"], [])
 
     def test_dependency_gate_fails_when_dynamic_combo_support_is_missing(self):
         v3_extension_module = importlib.import_module("v3_extension")
@@ -2076,6 +2222,303 @@ class BurveImageInfoTests(unittest.TestCase):
 
         self.assertIn("BurveImageInfo", node_map)
         self.assertEqual(node_map["BurveImageInfo"].define_schema().node_id, "BurveImageInfo")
+
+
+class BurveCropMaskLoadTests(unittest.TestCase):
+    def _make_gradient_image(self, path, size=(8, 6)):
+        image = nodes_module.Image.new("RGB", size)
+        for y in range(size[1]):
+            for x in range(size[0]):
+                image.putpixel((x, y), (x * 20, y * 30, (x + y) * 10))
+        image.save(path)
+
+    def _write_test_image(self, temp_dir, name="sample.png", size=(8, 6)):
+        path = os.path.join(temp_dir, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._make_gradient_image(path, size=size)
+        return path
+
+    def _patch_input_dir(self, temp_dir):
+        return mock.patch.object(BurveCropMaskLoad, "_get_input_directory", return_value=temp_dir)
+
+    def test_blank_state_returns_default_crop_and_empty_mask(self):
+        node = BurveCropMaskLoad()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_test_image(temp_dir)
+            with self._patch_input_dir(temp_dir):
+                image, cut_image, image_mask, aspect_ratio, crop_region_pipe = node.load(
+                    image="sample.png",
+                    aspect_ratio="1:1",
+                    editor_state_json="",
+                )
+
+        self.assertEqual(tuple(image.shape), (1, 6, 8, 3))
+        self.assertEqual(tuple(cut_image.shape), (1, 6, 6, 3))
+        self.assertEqual(tuple(image_mask.shape), (1, 6, 8))
+        self.assertEqual(float(image_mask.sum().item()), 0.0)
+        self.assertEqual(aspect_ratio, "1:1")
+        self.assertEqual(crop_region_pipe["crop"], {"x": 1, "y": 0, "width": 6, "height": 6})
+
+    def test_fixed_editor_state_produces_expected_crop_pixels(self):
+        node = BurveCropMaskLoad()
+        state = json.dumps(
+            {
+                "version": 1,
+                "image_name": "sample.png",
+                "source_size": {"width": 8, "height": 6},
+                "aspect_ratio": "3:2",
+                "crop": {"x": 2, "y": 2, "width": 3, "height": 2},
+                "viewport": {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0},
+                "brush": {"radius_px": 48, "softness": 0.35, "opacity": 1.0, "mode": "paint"},
+                "strokes": [],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_test_image(temp_dir)
+            with self._patch_input_dir(temp_dir):
+                _, cut_image, _, _, crop_region_pipe = node.load(
+                    image="sample.png",
+                    aspect_ratio="3:2",
+                    editor_state_json=state,
+                )
+
+        self.assertEqual(tuple(cut_image.shape), (1, 2, 3, 3))
+        self.assertAlmostEqual(float(cut_image[0, 0, 0, 0].item()), 40.0 / 255.0, places=5)
+        self.assertAlmostEqual(float(cut_image[0, 0, 0, 1].item()), 60.0 / 255.0, places=5)
+        self.assertEqual(crop_region_pipe["crop"], {"x": 2, "y": 2, "width": 3, "height": 2})
+
+    def test_validate_inputs_rejects_malformed_state_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_test_image(temp_dir)
+            with self._patch_input_dir(temp_dir):
+                result = BurveCropMaskLoad.VALIDATE_INPUTS(
+                    image="sample.png",
+                    aspect_ratio="1:1",
+                    editor_state_json="{bad json",
+                )
+
+        self.assertIn("valid JSON", result)
+
+    def test_validate_inputs_rejects_out_of_bounds_crop(self):
+        state = json.dumps(
+            {
+                "version": 1,
+                "image_name": "sample.png",
+                "source_size": {"width": 8, "height": 6},
+                "crop": {"x": 6, "y": 0, "width": 6, "height": 6},
+                "strokes": [],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_test_image(temp_dir)
+            with self._patch_input_dir(temp_dir):
+                result = BurveCropMaskLoad.VALIDATE_INPUTS(
+                    image="sample.png",
+                    aspect_ratio="1:1",
+                    editor_state_json=state,
+                )
+
+        self.assertIn("inside the source image", result)
+
+    def test_crop_region_pipe_normalization_rejects_wrong_kind(self):
+        with self.assertRaisesRegex(ValueError, "unexpected kind"):
+            BurveCropMaskLoad._normalize_crop_region_pipe(
+                {
+                    "kind": "wrong.kind",
+                    "version": CROP_REGION_PIPE_VERSION,
+                    "crop": {"x": 0, "y": 0, "width": 1, "height": 1},
+                }
+            )
+
+    def test_mask_replay_is_soft_and_clipped_to_crop(self):
+        node = BurveCropMaskLoad()
+        state = json.dumps(
+            {
+                "version": 1,
+                "image_name": "sample.png",
+                "source_size": {"width": 8, "height": 6},
+                "aspect_ratio": "1:1",
+                "crop": {"x": 1, "y": 0, "width": 6, "height": 6},
+                "viewport": {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0},
+                "brush": {"radius_px": 2, "softness": 0.5, "opacity": 1.0, "mode": "paint"},
+                "strokes": [
+                    {
+                        "mode": "paint",
+                        "radius_px": 2,
+                        "softness": 0.5,
+                        "opacity": 1.0,
+                        "points": [[0.5, 0.5], [3.0, 3.0]],
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_test_image(temp_dir)
+            with self._patch_input_dir(temp_dir):
+                _, _, image_mask, _, _ = node.load(
+                    image="sample.png",
+                    aspect_ratio="1:1",
+                    editor_state_json=state,
+                )
+
+        self.assertEqual(tuple(image_mask.shape), (1, 6, 8))
+        self.assertGreater(float(image_mask.max().item()), 0.0)
+        self.assertLessEqual(float(image_mask.max().item()), 1.0)
+        self.assertEqual(float(image_mask[0, 0, 0].item()), 0.0)
+        self.assertGreater(float(image_mask[0, 2, 2].item()), 0.0)
+
+    def test_is_changed_tracks_image_bytes_and_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = self._write_test_image(temp_dir)
+            with self._patch_input_dir(temp_dir):
+                first = BurveCropMaskLoad.IS_CHANGED("sample.png", "1:1", "")
+                second = BurveCropMaskLoad.IS_CHANGED("sample.png", "1:1", '{"version":1}')
+
+                image = nodes_module.Image.open(image_path).convert("RGB")
+                image.putpixel((0, 0), (255, 0, 0))
+                image.save(image_path)
+                third = BurveCropMaskLoad.IS_CHANGED("sample.png", "1:1", '{"version":1}')
+
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(second, third)
+
+    def test_fallback_input_dir_helpers_work_without_folder_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_test_image(temp_dir, name="nested/example.png")
+            with self._patch_input_dir(temp_dir):
+                files = BurveCropMaskLoad._list_input_images()
+                exists = BurveCropMaskLoad._exists_annotated_filepath("nested/example.png")
+                resolved = BurveCropMaskLoad._get_annotated_filepath("nested/example.png")
+
+        self.assertEqual(files, ["nested/example.png"])
+        self.assertTrue(exists)
+        self.assertTrue(resolved.endswith(os.path.join("nested", "example.png")))
+
+
+class BurveCropMaskApplyTests(unittest.TestCase):
+    def _make_pipe(self, width=4, height=4, aspect_ratio="1:1", crop=None):
+        crop = crop or {"x": 1, "y": 1, "width": 2, "height": 2}
+        return {
+            "kind": CROP_REGION_PIPE_KIND,
+            "version": CROP_REGION_PIPE_VERSION,
+            "source_width": width,
+            "source_height": height,
+            "aspect_ratio": aspect_ratio,
+            "crop": crop,
+        }
+
+    def test_apply_composites_outputs_and_ignores_mask_outside_crop(self):
+        node = BurveCropMaskApply()
+        base_image = torch.zeros((1, 4, 4, 3), dtype=torch.float32)
+        new_image = torch.full((1, 2, 2, 3), 0.25, dtype=torch.float32)
+        mask = torch.zeros((1, 4, 4), dtype=torch.float32)
+        mask[0, 0, 0] = 1.0
+        mask[0, 1, 1] = 1.0
+        mask[0, 1, 2] = 0.5
+        crop_region_pipe = self._make_pipe()
+
+        edited_image, placed_image_white_bg, masked_placed_image_white_bg = node.apply(
+            base_image=base_image,
+            new_image=new_image,
+            crop_region_pipe=crop_region_pipe,
+            mask=mask,
+        )
+
+        self.assertEqual(tuple(edited_image.shape), (1, 4, 4, 3))
+        self.assertEqual(tuple(placed_image_white_bg.shape), (1, 4, 4, 3))
+        self.assertEqual(tuple(masked_placed_image_white_bg.shape), (1, 4, 4, 3))
+
+        self.assertAlmostEqual(float(edited_image[0, 0, 0, 0].item()), 0.0, places=6)
+        self.assertAlmostEqual(float(edited_image[0, 1, 1, 0].item()), 0.25, places=6)
+        self.assertAlmostEqual(float(edited_image[0, 1, 2, 0].item()), 0.125, places=6)
+        self.assertAlmostEqual(float(edited_image[0, 0, 1, 0].item()), 0.0, places=6)
+
+        self.assertAlmostEqual(float(placed_image_white_bg[0, 0, 0, 0].item()), 1.0, places=6)
+        self.assertAlmostEqual(float(placed_image_white_bg[0, 1, 1, 0].item()), 0.25, places=6)
+        self.assertAlmostEqual(float(placed_image_white_bg[0, 2, 2, 0].item()), 0.25, places=6)
+
+        self.assertAlmostEqual(float(masked_placed_image_white_bg[0, 0, 0, 0].item()), 1.0, places=6)
+        self.assertAlmostEqual(float(masked_placed_image_white_bg[0, 1, 1, 0].item()), 0.25, places=6)
+        self.assertAlmostEqual(float(masked_placed_image_white_bg[0, 1, 2, 0].item()), 0.625, places=6)
+        self.assertAlmostEqual(float(masked_placed_image_white_bg[0, 2, 1, 0].item()), 1.0, places=6)
+
+    def test_apply_upscales_smaller_new_image_to_crop(self):
+        node = BurveCropMaskApply()
+        base_image = torch.zeros((1, 4, 4, 3), dtype=torch.float32)
+        new_image = torch.full((1, 1, 1, 3), 0.4, dtype=torch.float32)
+        mask = torch.ones((1, 4, 4), dtype=torch.float32)
+        crop_region_pipe = self._make_pipe()
+
+        _, placed_image_white_bg, _ = node.apply(
+            base_image=base_image,
+            new_image=new_image,
+            crop_region_pipe=crop_region_pipe,
+            mask=mask,
+        )
+
+        self.assertAlmostEqual(float(placed_image_white_bg[0, 1, 1, 0].item()), 0.4, places=6)
+        self.assertAlmostEqual(float(placed_image_white_bg[0, 2, 2, 0].item()), 0.4, places=6)
+
+    def test_apply_rejects_aspect_ratio_mismatch(self):
+        node = BurveCropMaskApply()
+        with self.assertRaisesRegex(ValueError, "aspect ratio must match"):
+            node.apply(
+                base_image=torch.zeros((1, 4, 4, 3), dtype=torch.float32),
+                new_image=torch.zeros((1, 4, 2, 3), dtype=torch.float32),
+                crop_region_pipe=self._make_pipe(),
+                mask=torch.zeros((1, 4, 4), dtype=torch.float32),
+            )
+
+    def test_apply_rejects_batch_sizes_other_than_one(self):
+        node = BurveCropMaskApply()
+        with self.assertRaisesRegex(ValueError, "base_image must have batch size 1"):
+            node.apply(
+                base_image=torch.zeros((2, 4, 4, 3), dtype=torch.float32),
+                new_image=torch.zeros((1, 2, 2, 3), dtype=torch.float32),
+                crop_region_pipe=self._make_pipe(),
+                mask=torch.zeros((1, 4, 4), dtype=torch.float32),
+            )
+
+    def test_apply_rejects_source_size_mismatch(self):
+        node = BurveCropMaskApply()
+        with self.assertRaisesRegex(ValueError, "source size must match"):
+            node.apply(
+                base_image=torch.zeros((1, 4, 4, 3), dtype=torch.float32),
+                new_image=torch.zeros((1, 2, 2, 3), dtype=torch.float32),
+                crop_region_pipe=self._make_pipe(width=8, height=4),
+                mask=torch.zeros((1, 4, 4), dtype=torch.float32),
+            )
+
+    def test_apply_rejects_mask_dimension_mismatch(self):
+        node = BurveCropMaskApply()
+        with self.assertRaisesRegex(ValueError, "mask dimensions must match"):
+            node.apply(
+                base_image=torch.zeros((1, 4, 4, 3), dtype=torch.float32),
+                new_image=torch.zeros((1, 2, 2, 3), dtype=torch.float32),
+                crop_region_pipe=self._make_pipe(),
+                mask=torch.zeros((1, 3, 4), dtype=torch.float32),
+            )
+
+    def test_apply_rejects_invalid_crop_region_pipe(self):
+        node = BurveCropMaskApply()
+        with self.assertRaisesRegex(ValueError, "unexpected kind"):
+            node.apply(
+                base_image=torch.zeros((1, 4, 4, 3), dtype=torch.float32),
+                new_image=torch.zeros((1, 2, 2, 3), dtype=torch.float32),
+                crop_region_pipe={
+                    "kind": "wrong.kind",
+                    "version": CROP_REGION_PIPE_VERSION,
+                    "source_width": 4,
+                    "source_height": 4,
+                    "aspect_ratio": "1:1",
+                    "crop": {"x": 1, "y": 1, "width": 2, "height": 2},
+                },
+                mask=torch.zeros((1, 4, 4), dtype=torch.float32),
+            )
 
 
 class BurveImageGenAuthTests(unittest.TestCase):
@@ -2220,12 +2663,16 @@ class NodeRegistrationTests(unittest.TestCase):
     def test_package_exports_v3_entrypoint(self):
         self.assertTrue(callable(package_module.comfy_entrypoint))
 
-    def test_package_does_not_export_frontend_web_directory(self):
-        self.assertFalse(hasattr(package_module, "WEB_DIRECTORY"))
-        self.assertEqual(package_module.__all__, ["comfy_entrypoint"])
+    def test_package_exports_frontend_web_directory(self):
+        self.assertTrue(hasattr(package_module, "WEB_DIRECTORY"))
+        self.assertEqual(package_module.WEB_DIRECTORY, "./web/js")
+        self.assertEqual(package_module.__all__, ["WEB_DIRECTORY", "comfy_entrypoint"])
 
     def test_frontend_seed_fix_script_is_removed(self):
         self.assertFalse(os.path.exists(os.path.join(REPO_DIR, "js", "gemini_seed_control_fix.js")))
+
+    def test_crop_mask_frontend_extension_exists(self):
+        self.assertTrue(os.path.exists(os.path.join(REPO_DIR, "web", "js", "burve_crop_mask_load.js")))
 
 
 if __name__ == "__main__":

@@ -7,11 +7,11 @@ A collection of custom nodes for ComfyUI, focusing on integration with Google's 
 ### 1. Burve Google Image Gen
 This is the AI Studio version of the main image-generation node.
 
-*   **Functionality**: Generates images based on text prompts, with support for system instructions and reference images.
+*   **Functionality**: Generates images based on text prompts, with support for system instructions, reference images, and an optional external aspect-ratio override.
 *   **Inputs**:
     *   `prompt`: The description of the image you want to generate. When `character_pipe` is connected, this direct field is ignored.
     *   `model`: A DynamicCombo model selector. The selected model controls which nested fields are shown.
-    *   Common fields outside the DynamicCombo: `seed` with `control_after_generate`, `system_instructions`, `reference_images`, `character_pipe`.
+    *   Common fields outside the DynamicCombo: `seed` with `control_after_generate`, `system_instructions`, `reference_images`, `character_pipe`, `aspect_ratio_override`.
     *   `gemini-2.5-flash-image` fields: `aspect_ratio`
     *   `gemini-3-pro-image-preview` fields: `aspect_ratio`, `resolution`, `search_mode`
     *   `gemini-3-pro-image-preview` may still return thought text and thought images in the existing outputs, but it does not expose user-configurable thinking controls.
@@ -30,9 +30,14 @@ This is the AI Studio version of the main image-generation node.
     *   `system_instructions` (Optional): Advanced instructions to guide the model's behavior. Ignored when `character_pipe` is connected.
     *   `reference_images` (Optional): A list of images to use as context/reference for the generation. Use the **Burve Image Ref Pack** node or the **Burve Character Planner** node to create this list. Ignored when `character_pipe` is connected.
     *   `character_pipe` (Optional): A one-cable `CHARACTER_GEN_PIPE` bundle from **Burve Character Planner**. When connected, the node becomes pipe-authoritative and uses the planner's `prompt`, `system_instructions`, and `reference_images`.
+    *   `aspect_ratio_override` (Optional): A plain `W:H` ratio string socket for nodes like **Burve Crop + Mask Load** or **Burve Image Info**. When connected or manually set, it overrides the DynamicCombo model's internal `aspect_ratio` field.
     *   Advanced optional request controls:
         `request_timeout_seconds`: Overall Gemini request timeout budget in seconds. Default: `120`.
         `retry_attempts`: Total attempts for transient request failures. Default: `5`. `1` disables retries.
+*   **Aspect-ratio override behavior**:
+    *   If `aspect_ratio_override` is empty, the node uses the `aspect_ratio` selected inside the DynamicCombo model UI.
+    *   If `aspect_ratio_override` is present and the selected model supports it, the override is used for the request.
+    *   If `aspect_ratio_override` is present but the selected model does not support it, the node throws an error before any Gemini request is sent.
 *   **Outputs**:
     *   `image`: The generated image(s).
     *   `thinking_image`: Any thought-stage image(s) returned by the model.
@@ -54,19 +59,62 @@ A utility node to bundle multiple images into a single list for the generator no
 *   **Inputs**: `image1` through `image14` (optional).
 *   **Outputs**: `images` (A list of images).
 
-### 4. Burve Debug Gemini Key
+### 4. Burve Crop + Mask Load
+An interactive image-loader node with crop-region editing and soft mask painting.
+
+*   **Functionality**: Loads an image from the ComfyUI input folder, lets you choose a fixed aspect-ratio crop, move and resize the crop interactively, and paint a soft mask that stays constrained to the crop area.
+*   **Inputs**:
+    *   `image`: Select an image from the ComfyUI input directory.
+    *   `aspect_ratio`: Crop ratio preset shared across the Burve image-gen-safe set: `1:1`, `3:2`, `2:3`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9`.
+    *   `editor_state_json` (Advanced/internal): Stored UI state used by the custom editor. The frontend manages this automatically.
+*   **Outputs**:
+    *   `image`: The original source image as a standard `IMAGE`.
+    *   `cut_image`: The cropped image region as a standard `IMAGE`.
+    *   `image_mask`: A full-size soft `MASK` matching the original image dimensions. `1.0` means painted/masked, `0.0` means clear.
+    *   `aspect_ratio`: The selected ratio string, suitable for plugging into `aspect_ratio_override` on compatible Burve image-generation workflows.
+    *   `crop_region_pipe`: A `CROP_REGION_PIPE` bundle carrying source size, selected aspect ratio, and pixel crop rect for a future downstream region-aware node.
+*   **Editor behavior**:
+    *   `Crop` mode: drag the crop frame to move it, drag corner handles to resize it while preserving ratio.
+    *   `Paint` / `Erase` modes: draw soft strokes clipped to the crop area only.
+    *   Mouse wheel zooms around the cursor. Space-drag or middle-mouse drag pans the viewport.
+    *   `Fit` resets the viewport. `Reset Crop` restores the centered default crop for the current ratio. `Clear Mask` removes all painted strokes.
+*   **Notes**:
+    *   Saved workflows persist the crop box, viewport, brush settings, and mask strokes through the hidden `editor_state_json` widget.
+    *   Changing the selected image resets the editor state when the source file or source dimensions no longer match.
+    *   The editor keeps crop handles, brush previews, and paint/erase points aligned across graph zoom, browser zoom, HiDPI, and fractional scaling.
+    *   This first release is loader-only and does not accept an upstream `IMAGE` input.
+
+### 5. Burve Crop + Mask Apply
+Applies a crop-region replacement back onto a full-size image using a full-size mask.
+
+*   **Functionality**: Takes a base image, a replacement image, the `crop_region_pipe` from **Burve Crop + Mask Load**, and a full-size mask. It validates the replacement image aspect ratio, resizes it to the crop rectangle, and blends only masked pixels back onto the base image.
+*   **Inputs**:
+    *   `base_image`: The full-size original image that will receive the edit.
+    *   `new_image`: A single-frame image whose aspect ratio must match the crop pipe ratio. It may be any size and will always be resized to the crop rectangle.
+    *   `crop_region_pipe`: The `CROP_REGION_PIPE` output from **Burve Crop + Mask Load**.
+    *   `mask`: A full-size soft `MASK`. `1.0` transfers pixels from the placed image, `0.0` keeps the original base image.
+*   **Outputs**:
+    *   `edited_image`: The base image with only masked pixels inside the crop replaced.
+    *   `placed_image_white_bg`: A full-size white canvas with the resized `new_image` filling the crop rectangle.
+    *   `masked_placed_image_white_bg`: A full-size white canvas where only masked pixels from the placed image are visible.
+*   **Notes**:
+    *   This node is single-frame only. `base_image`, `new_image`, and `mask` must each have batch size `1`.
+    *   Mask values outside the crop rectangle are ignored even if they are nonzero.
+    *   A mismatched `new_image` aspect ratio throws a hard error instead of auto-cropping.
+
+### 6. Burve Debug Gemini Key
 A helper node to verify your API key configuration.
 
 *   **Functionality**: Checks if the `GEMINI_API_KEY` environment variable is correctly set and visible to ComfyUI. It displays the status and a masked version of the key.
 *   **Outputs**: `info` (Status message).
 
-### 5. Burve Debug Vertex Auth
+### 7. Burve Debug Vertex Auth
 A helper node to verify your Vertex AI environment configuration.
 
 *   **Functionality**: Reports whether `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, and `GOOGLE_APPLICATION_CREDENTIALS` are present inside ComfyUI, and reminds you that ADC can also come from `gcloud auth application-default login`.
 *   **Outputs**: `info` (Status message).
 
-### 6. Burve System Instructions
+### 8. Burve System Instructions
 Selects pre-defined system instructions from a dropdown menu.
 
 *   **Functionality**: Loads system instructions from a JSON file (which auto-updates from GitHub) and outputs the selected instruction text.
@@ -75,7 +123,7 @@ Selects pre-defined system instructions from a dropdown menu.
 *   **Outputs**:
     *   `instruction`: The full text of the selected system instruction.
 
-### 7. Burve Variable Injector
+### 9. Burve Variable Injector
 Defines variables for use in dynamic prompts.
 
 *   **Functionality**: A utility node to create a dictionary of variable values. Accepts up to 14 string inputs.
@@ -84,7 +132,7 @@ Defines variables for use in dynamic prompts.
 *   **Outputs**:
     *   `variables`: A dictionary of the provided variables.
 
-### 8. Burve Prompt Database
+### 10. Burve Prompt Database
 Loads prompts from a database and injects variables.
 
 *   **Functionality**: Selects a prompt from a JSON database (auto-updating) and replaces placeholders (e.g., `[[name:default]]`) with values from the **Burve Variable Injector**.
@@ -97,7 +145,7 @@ Loads prompts from a database and injects variables.
     *   `title`: The title of the selected prompt.
 
 
-### 9. Burve Image Info
+### 11. Burve Image Info
 Reports the dimensions and aspect ratio of an input image.
 
 *   **Functionality**: Reads a standard ComfyUI `IMAGE` tensor, reports its pixel size, and returns a simplified `W:H` aspect ratio string.
@@ -109,7 +157,7 @@ Reports the dimensions and aspect ratio of an input image.
     *   `height`: Image height in pixels.
     *   `aspect_ratio`: Simplified ratio string such as `4:3`, `16:9`, or `1:1`.
 
-### 10. Burve Blind Grid Splitter
+### 12. Burve Blind Grid Splitter
 Splits an image into a grid of tiles without content analysis.
 
 *   **Functionality**: Slices an input image into a specified number of rows and columns. Useful for processing large images in chunks.
@@ -121,7 +169,7 @@ Splits an image into a grid of tiles without content analysis.
 *   **Outputs**:
     *   `tiles`: A batch of images containing the resulting grid tiles.
 
-### 11. Burve Character Planner
+### 13. Burve Character Planner
 Builds a reusable base-character prompt bundle for `Burve Google Image Gen`.
 
 *   **Functionality**: Combines curated body, age, gender, race, and appearance controls with optional raw JSON overrides, emits a generation-ready prompt, emits optional face-lock system instructions, and packs ordered reference images with the dedicated face image first.
@@ -152,7 +200,7 @@ Builds a reusable base-character prompt bundle for `Burve Google Image Gen`.
     *   `custom_race`, `custom_skin_tone`, and `custom_hair_color` are inline empty override widgets next to the values they replace.
     *   `plan_overrides_json` still has final precedence, but contradictory male/female outfit or underage overrides are rejected.
 
-### 12. Burve Character Race Details
+### 14. Burve Character Race Details
 Builds a reusable fantasy race-detail bundle for `Burve Character Planner`.
 
 *   **Functionality**: Produces a `CHARACTER_RACE_PIPE` with optional race-name override plus curated fantasy anatomy traits such as wings, horns, tails, hooves, scales, claws, and related head or limb features.
