@@ -91,13 +91,46 @@ BUILTIN_IO_TYPES = {
 def ensure_dynamic_combo_support() -> None:
     if not hasattr(IO, "DynamicCombo") or not hasattr(IO.DynamicCombo, "Input"):
         raise RuntimeError(
-            "ComfyUI_Burve_Tools 2.1.0 requires a DynamicCombo-capable ComfyUI build "
+            "ComfyUI_Burve_Tools 2.2.0 requires a DynamicCombo-capable ComfyUI build "
             "with comfy_api.latest.IO.DynamicCombo.Input available."
         )
 
 
 def _io_type(io_type: str):
     return BUILTIN_IO_TYPES.get(io_type) or IO.Custom(io_type)
+
+
+def _translate_upload_option(meta: dict[str, Any]) -> Any:
+    upload_map = (
+        ("image_upload", getattr(getattr(IO, "UploadType", None), "image", None)),
+        ("audio_upload", getattr(getattr(IO, "UploadType", None), "audio", None)),
+        ("video_upload", getattr(getattr(IO, "UploadType", None), "video", None)),
+        ("file_upload", getattr(getattr(IO, "UploadType", None), "model", None)),
+    )
+    for key, upload_type in upload_map:
+        if meta.get(key) and upload_type is not None:
+            return upload_type
+    return None
+
+
+def _translate_folder_type(folder_type: Any) -> Any:
+    folder_enum = getattr(IO, "FolderType", None)
+    if folder_enum is None or folder_type in {None, ""}:
+        return None
+    if hasattr(folder_enum, str(folder_type)):
+        return getattr(folder_enum, str(folder_type))
+    return None
+
+
+def _translate_remote_options(remote: Any) -> Any:
+    if remote is None:
+        return None
+    remote_type = getattr(IO, "RemoteOptions", None)
+    if remote_type is None:
+        return remote
+    if isinstance(remote, dict):
+        return remote_type(**remote)
+    return remote
 
 
 def _translate_v1_options(io_type: str, meta: dict[str, Any]) -> dict[str, Any]:
@@ -123,14 +156,29 @@ def _translate_v1_options(io_type: str, meta: dict[str, Any]) -> dict[str, Any]:
         "step": "step",
         "tooltip": "tooltip",
     }
+    upload_flag_keys = {"image_upload", "audio_upload", "video_upload", "file_upload"}
 
     for key, value in meta.items():
         if key == "control_after_generate":
             translated["control_after_generate"] = value
+        elif key in upload_flag_keys or key in {"image_folder", "remote"}:
+            continue
         elif key in option_map:
             translated[option_map[key]] = value
         else:
             extra_dict[key] = value
+
+    upload = _translate_upload_option(meta)
+    if upload is not None:
+        translated["upload"] = upload
+
+    image_folder = _translate_folder_type(meta.get("image_folder"))
+    if image_folder is not None:
+        translated["image_folder"] = image_folder
+
+    remote = _translate_remote_options(meta.get("remote"))
+    if remote is not None:
+        translated["remote"] = remote
 
     if io_type not in {"STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"}:
         translated.pop("default", None)

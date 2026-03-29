@@ -175,6 +175,26 @@ def install_test_stubs():
             auth_token_comfy_org = "AUTH_TOKEN_COMFY_ORG"
             api_key_comfy_org = "API_KEY_COMFY_ORG"
 
+        class UploadType:
+            image = "image_upload"
+            audio = "audio_upload"
+            video = "video_upload"
+            model = "file_upload"
+
+        class FolderType:
+            input = "input"
+            output = "output"
+            temp = "temp"
+
+        class RemoteOptions:
+            def __init__(self, route, refresh_button, control_after_refresh="first", timeout=None, max_retries=None, refresh=None):
+                self.route = route
+                self.refresh_button = refresh_button
+                self.control_after_refresh = control_after_refresh
+                self.timeout = timeout
+                self.max_retries = max_retries
+                self.refresh = refresh
+
         class StubInput:
             def __init__(self, id, **kwargs):
                 self.id = id
@@ -294,14 +314,17 @@ def install_test_stubs():
             ControlAfterGenerate=ControlAfterGenerate,
             Custom=Custom,
             DynamicCombo=DynamicComboType,
+            FolderType=FolderType,
             Float=make_type("FLOAT"),
             Hidden=Hidden,
             Image=make_type("IMAGE"),
             Int=make_type("INT"),
             Mask=make_type("MASK"),
             NodeOutput=NodeOutput,
+            RemoteOptions=RemoteOptions,
             Schema=Schema,
             String=make_type("STRING"),
+            UploadType=UploadType,
         )
 
         latest_stub.ComfyExtension = ComfyExtension
@@ -2152,6 +2175,12 @@ class BurveV3ExtensionTests(unittest.TestCase):
             ["image", "cut_image", "image_mask", "aspect_ratio", "crop_region_pipe"],
         )
         self.assertEqual(schema.outputs[-1].io_type, "CROP_REGION_PIPE")
+        image_input = schema.inputs[0]
+        self.assertEqual(image_input.kwargs["upload"], "image_upload")
+        self.assertEqual(image_input.kwargs["image_folder"], "input")
+        self.assertEqual(image_input.kwargs["remote"].route, "/internal/files/input")
+        self.assertTrue(image_input.kwargs["remote"].refresh_button)
+        self.assertEqual(image_input.kwargs["remote"].control_after_refresh, "first")
 
         v1_info = schema.get_v1_info(include_hidden=False)
         self.assertEqual(v1_info["input_order"]["required"], ["image", "aspect_ratio"])
@@ -2163,15 +2192,20 @@ class BurveV3ExtensionTests(unittest.TestCase):
 
         self.assertEqual(
             [item.id for item in schema.inputs],
-            ["base_image", "new_image", "crop_region_pipe", "mask"],
+            ["base_image", "new_image", "crop_region_pipe", "mask", "strict_aspect_ratio"],
         )
         self.assertEqual(
             [item.id for item in schema.outputs],
-            ["edited_image", "placed_image_white_bg", "masked_placed_image_white_bg"],
+            ["edited_image", "placed_image_white_bg", "masked_placed_image_white_bg", "status"],
         )
+        self.assertTrue(schema.inputs[-1].kwargs["advanced"])
+        self.assertEqual(schema.inputs[-1].kwargs["default"], False)
 
         v1_info = schema.get_v1_info(include_hidden=False)
-        self.assertEqual(v1_info["input_order"]["required"], ["base_image", "new_image", "crop_region_pipe", "mask"])
+        self.assertEqual(
+            v1_info["input_order"]["required"],
+            ["base_image", "new_image", "crop_region_pipe", "mask", "strict_aspect_ratio"],
+        )
         self.assertEqual(v1_info["input_order"]["optional"], [])
 
     def test_dependency_gate_fails_when_dynamic_combo_support_is_missing(self):
@@ -2398,6 +2432,22 @@ class BurveCropMaskLoadTests(unittest.TestCase):
         self.assertTrue(exists)
         self.assertTrue(resolved.endswith(os.path.join("nested", "example.png")))
 
+    def test_input_types_expose_image_upload_and_remote_refresh(self):
+        input_types = BurveCropMaskLoad.INPUT_TYPES()
+        image_spec = input_types["required"]["image"]
+        image_meta = image_spec[1]
+
+        self.assertTrue(image_meta["image_upload"])
+        self.assertEqual(image_meta["image_folder"], "input")
+        self.assertEqual(
+            image_meta["remote"],
+            {
+                "route": "/internal/files/input",
+                "refresh_button": True,
+                "control_after_refresh": "first",
+            },
+        )
+
 
 class BurveCropMaskApplyTests(unittest.TestCase):
     def _make_pipe(self, width=4, height=4, aspect_ratio="1:1", crop=None):
@@ -2421,7 +2471,7 @@ class BurveCropMaskApplyTests(unittest.TestCase):
         mask[0, 1, 2] = 0.5
         crop_region_pipe = self._make_pipe()
 
-        edited_image, placed_image_white_bg, masked_placed_image_white_bg = node.apply(
+        edited_image, placed_image_white_bg, masked_placed_image_white_bg, status = node.apply(
             base_image=base_image,
             new_image=new_image,
             crop_region_pipe=crop_region_pipe,
@@ -2431,6 +2481,7 @@ class BurveCropMaskApplyTests(unittest.TestCase):
         self.assertEqual(tuple(edited_image.shape), (1, 4, 4, 3))
         self.assertEqual(tuple(placed_image_white_bg.shape), (1, 4, 4, 3))
         self.assertEqual(tuple(masked_placed_image_white_bg.shape), (1, 4, 4, 3))
+        self.assertEqual(status, "")
 
         self.assertAlmostEqual(float(edited_image[0, 0, 0, 0].item()), 0.0, places=6)
         self.assertAlmostEqual(float(edited_image[0, 1, 1, 0].item()), 0.25, places=6)
@@ -2453,7 +2504,7 @@ class BurveCropMaskApplyTests(unittest.TestCase):
         mask = torch.ones((1, 4, 4), dtype=torch.float32)
         crop_region_pipe = self._make_pipe()
 
-        _, placed_image_white_bg, _ = node.apply(
+        _, placed_image_white_bg, _, status = node.apply(
             base_image=base_image,
             new_image=new_image,
             crop_region_pipe=crop_region_pipe,
@@ -2462,16 +2513,63 @@ class BurveCropMaskApplyTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(placed_image_white_bg[0, 1, 1, 0].item()), 0.4, places=6)
         self.assertAlmostEqual(float(placed_image_white_bg[0, 2, 2, 0].item()), 0.4, places=6)
+        self.assertEqual(status, "")
 
-    def test_apply_rejects_aspect_ratio_mismatch(self):
+    def test_apply_auto_fits_near_match_and_returns_warning(self):
         node = BurveCropMaskApply()
-        with self.assertRaisesRegex(ValueError, "aspect ratio must match"):
+        crop_region_pipe = self._make_pipe(width=6, height=9, aspect_ratio="2:3", crop={"x": 1, "y": 1, "width": 4, "height": 6})
+        edited_image, placed_image_white_bg, masked_placed_image_white_bg, status = node.apply(
+            base_image=torch.zeros((1, 9, 6, 3), dtype=torch.float32),
+            new_image=torch.linspace(0.0, 1.0, steps=212 * 316 * 3, dtype=torch.float32).reshape(1, 316, 212, 3),
+            crop_region_pipe=crop_region_pipe,
+            mask=torch.ones((1, 9, 6), dtype=torch.float32),
+        )
+
+        self.assertEqual(tuple(edited_image.shape), (1, 9, 6, 3))
+        self.assertEqual(tuple(placed_image_white_bg.shape), (1, 9, 6, 3))
+        self.assertEqual(tuple(masked_placed_image_white_bg.shape), (1, 9, 6, 3))
+        self.assertIn("normalized to 2:3 by centered crop", status)
+        self.assertIn("53:79", status)
+        self.assertIn("0.63%", status)
+
+    def test_apply_rejects_near_match_when_strict_mode_is_enabled(self):
+        node = BurveCropMaskApply()
+        with self.assertRaisesRegex(ValueError, "strict_aspect_ratio is enabled"):
             node.apply(
-                base_image=torch.zeros((1, 4, 4, 3), dtype=torch.float32),
-                new_image=torch.zeros((1, 4, 2, 3), dtype=torch.float32),
-                crop_region_pipe=self._make_pipe(),
-                mask=torch.zeros((1, 4, 4), dtype=torch.float32),
+                base_image=torch.zeros((1, 9, 6, 3), dtype=torch.float32),
+                new_image=torch.zeros((1, 316, 212, 3), dtype=torch.float32),
+                crop_region_pipe=self._make_pipe(
+                    width=6,
+                    height=9,
+                    aspect_ratio="2:3",
+                    crop={"x": 1, "y": 1, "width": 4, "height": 6},
+                ),
+                mask=torch.zeros((1, 9, 6), dtype=torch.float32),
+                strict_aspect_ratio=True,
             )
+
+    def test_apply_rejects_large_aspect_ratio_mismatch_in_forgiving_mode(self):
+        node = BurveCropMaskApply()
+        with self.assertRaisesRegex(ValueError, "safe auto-fit"):
+            node.apply(
+                base_image=torch.zeros((1, 9, 6, 3), dtype=torch.float32),
+                new_image=torch.zeros((1, 8, 8, 3), dtype=torch.float32),
+                crop_region_pipe=self._make_pipe(
+                    width=6,
+                    height=9,
+                    aspect_ratio="2:3",
+                    crop={"x": 1, "y": 1, "width": 4, "height": 6},
+                ),
+                mask=torch.zeros((1, 9, 6), dtype=torch.float32),
+            )
+
+    def test_apply_helper_reports_expected_trim_for_documented_case(self):
+        trim_fraction = BurveCropMaskApply._aspect_crop_loss_fraction(3392, 5056, "2:3")
+        message = BurveCropMaskApply._format_aspect_ratio_message(3392, 5056, "2:3", trim_fraction, "warning")
+
+        self.assertAlmostEqual(trim_fraction, 0.0062893081761006275, places=9)
+        self.assertIn("3392x5056 (53:79)", message)
+        self.assertIn("0.63%", message)
 
     def test_apply_rejects_batch_sizes_other_than_one(self):
         node = BurveCropMaskApply()

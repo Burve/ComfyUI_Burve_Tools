@@ -1883,7 +1883,18 @@ class BurveCropMaskLoad:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": (cls._input_image_options(),),
+                "image": (
+                    cls._input_image_options(),
+                    {
+                        "image_upload": True,
+                        "image_folder": "input",
+                        "remote": {
+                            "route": "/internal/files/input",
+                            "refresh_button": True,
+                            "control_after_refresh": "first",
+                        },
+                    },
+                ),
                 "aspect_ratio": (list(BURVE_CROP_MASK_ASPECT_RATIOS), {"default": "1:1"}),
             },
             "optional": {
@@ -2444,6 +2455,8 @@ class BurveCropMaskLoad:
 
 
 class BurveCropMaskApply:
+    MAX_AUTO_FIT_TRIM_FRACTION = 0.01
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -2452,11 +2465,12 @@ class BurveCropMaskApply:
                 "new_image": ("IMAGE",),
                 "crop_region_pipe": ("CROP_REGION_PIPE",),
                 "mask": ("MASK",),
+                "strict_aspect_ratio": ("BOOLEAN", {"default": False, "advanced": True}),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("edited_image", "placed_image_white_bg", "masked_placed_image_white_bg")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = ("edited_image", "placed_image_white_bg", "masked_placed_image_white_bg", "status")
     FUNCTION = "apply"
     CATEGORY = "BurveTools/Image"
 
@@ -2482,7 +2496,72 @@ class BurveCropMaskApply:
             raise ValueError("[BurveCropMaskApply] mask must have positive spatial dimensions.")
         return int(shape[1]), int(shape[2])
 
-    def apply(self, base_image, new_image, crop_region_pipe, mask):
+    @staticmethod
+    def _format_dimension_aspect_ratio(width, height):
+        divisor = math.gcd(int(width), int(height)) or 1
+        return f"{int(width) // divisor}:{int(height) // divisor}"
+
+    @classmethod
+    def _aspect_crop_loss_fraction(cls, width, height, aspect_ratio):
+        ratio_w, ratio_h = BurveCropMaskLoad._parse_aspect_ratio(aspect_ratio)
+        source_ratio = float(width) / float(height)
+        target_ratio = float(ratio_w) / float(ratio_h)
+        if source_ratio >= target_ratio:
+            return max(0.0, 1.0 - (target_ratio / source_ratio))
+        return max(0.0, 1.0 - (source_ratio / target_ratio))
+
+    @staticmethod
+    def _resize_cover_and_center_crop(image, target_height, target_width):
+        image_bchw = image.permute(0, 3, 1, 2)
+        source_height = int(image_bchw.shape[2])
+        source_width = int(image_bchw.shape[3])
+
+        if source_width * target_height == source_height * target_width:
+            resized = F.interpolate(
+                image_bchw,
+                size=(target_height, target_width),
+                mode="bilinear",
+                align_corners=False,
+            )
+            return resized.permute(0, 2, 3, 1)
+
+        if source_width * target_height > source_height * target_width:
+            resize_height = target_height
+            resize_width = max(1, int(math.ceil((target_height * source_width) / float(source_height))))
+        else:
+            resize_width = target_width
+            resize_height = max(1, int(math.ceil((target_width * source_height) / float(source_width))))
+
+        resized = F.interpolate(
+            image_bchw,
+            size=(resize_height, resize_width),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        crop_y = max((resize_height - target_height) // 2, 0)
+        crop_x = max((resize_width - target_width) // 2, 0)
+        cropped = resized[:, :, crop_y:crop_y + target_height, crop_x:crop_x + target_width]
+        return cropped.permute(0, 2, 3, 1)
+
+    @classmethod
+    def _format_aspect_ratio_message(cls, width, height, aspect_ratio, trim_fraction, kind):
+        actual_ratio = cls._format_dimension_aspect_ratio(width, height)
+        prefix = f"[BurveCropMaskApply] new_image {int(width)}x{int(height)} ({actual_ratio})"
+        if kind == "warning":
+            return (
+                f"{prefix} was normalized to {aspect_ratio} by centered crop; "
+                f"estimated trim {trim_fraction * 100.0:.2f}%."
+            )
+        if kind == "strict_error":
+            return f"{prefix} does not match required {aspect_ratio} and strict_aspect_ratio is enabled."
+        return (
+            f"{prefix} differs too much from required {aspect_ratio} for safe auto-fit; "
+            f"estimated trim {trim_fraction * 100.0:.2f}% exceeds "
+            f"{cls.MAX_AUTO_FIT_TRIM_FRACTION * 100.0:.2f}% limit."
+        )
+
+    def apply(self, base_image, new_image, crop_region_pipe, mask, strict_aspect_ratio=False):
         base_height, base_width = self._require_single_image_tensor("base_image", base_image)
         new_height, new_width = self._require_single_image_tensor("new_image", new_image)
         mask_height, mask_width = self._require_single_mask_tensor(mask)
@@ -2499,15 +2578,11 @@ class BurveCropMaskApply:
             raise ValueError("[BurveCropMaskApply] crop_region_pipe source size must match base_image dimensions.")
         if mask_height != base_height or mask_width != base_width:
             raise ValueError("[BurveCropMaskApply] mask dimensions must match base_image dimensions.")
-        if not BurveCropMaskLoad._ratio_matches(
-            {"width": new_width, "height": new_height},
-            normalized_pipe["aspect_ratio"],
-        ):
-            raise ValueError("[BurveCropMaskApply] new_image aspect ratio must match crop_region_pipe aspect_ratio.")
 
         base_image = base_image
         new_image = new_image.to(device=base_image.device, dtype=base_image.dtype)
         mask = mask.to(device=base_image.device, dtype=base_image.dtype)
+        status = ""
 
         crop = normalized_pipe["crop"]
         crop_x = int(crop["x"])
@@ -2515,12 +2590,46 @@ class BurveCropMaskApply:
         crop_width = int(crop["width"])
         crop_height = int(crop["height"])
 
-        resized_new_image = F.interpolate(
-            new_image.permute(0, 3, 1, 2),
-            size=(crop_height, crop_width),
-            mode="bilinear",
-            align_corners=False,
-        ).permute(0, 2, 3, 1)
+        if BurveCropMaskLoad._ratio_matches(
+            {"width": new_width, "height": new_height},
+            normalized_pipe["aspect_ratio"],
+        ):
+            resized_new_image = F.interpolate(
+                new_image.permute(0, 3, 1, 2),
+                size=(crop_height, crop_width),
+                mode="bilinear",
+                align_corners=False,
+            ).permute(0, 2, 3, 1)
+        else:
+            trim_fraction = self._aspect_crop_loss_fraction(new_width, new_height, normalized_pipe["aspect_ratio"])
+            if strict_aspect_ratio:
+                raise ValueError(
+                    self._format_aspect_ratio_message(
+                        new_width,
+                        new_height,
+                        normalized_pipe["aspect_ratio"],
+                        trim_fraction,
+                        "strict_error",
+                    )
+                )
+            if trim_fraction > self.MAX_AUTO_FIT_TRIM_FRACTION:
+                raise ValueError(
+                    self._format_aspect_ratio_message(
+                        new_width,
+                        new_height,
+                        normalized_pipe["aspect_ratio"],
+                        trim_fraction,
+                        "limit_error",
+                    )
+                )
+            resized_new_image = self._resize_cover_and_center_crop(new_image, crop_height, crop_width)
+            status = self._format_aspect_ratio_message(
+                new_width,
+                new_height,
+                normalized_pipe["aspect_ratio"],
+                trim_fraction,
+                "warning",
+            )
 
         white_canvas = torch.ones_like(base_image)
         placed_image_white_bg = white_canvas.clone()
@@ -2533,7 +2642,7 @@ class BurveCropMaskApply:
 
         edited_image = base_image * (1.0 - mask4d) + placed_image_white_bg * mask4d
         masked_placed_image_white_bg = white_canvas * (1.0 - mask4d) + placed_image_white_bg * mask4d
-        return (edited_image, placed_image_white_bg, masked_placed_image_white_bg)
+        return (edited_image, placed_image_white_bg, masked_placed_image_white_bg, status)
 
 
 class BurveBlindGridSplitter:

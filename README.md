@@ -64,7 +64,7 @@ An interactive image-loader node with crop-region editing and soft mask painting
 
 *   **Functionality**: Loads an image from the ComfyUI input folder, lets you choose a fixed aspect-ratio crop, move and resize the crop interactively, and paint a soft mask that stays constrained to the crop area.
 *   **Inputs**:
-    *   `image`: Select an image from the ComfyUI input directory.
+    *   `image`: Select an image from the ComfyUI input directory, or drag an image into the editor to upload it there.
     *   `aspect_ratio`: Crop ratio preset shared across the Burve image-gen-safe set: `1:1`, `3:2`, `2:3`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9`.
     *   `editor_state_json` (Advanced/internal): Stored UI state used by the custom editor. The frontend manages this automatically.
 *   **Outputs**:
@@ -76,31 +76,36 @@ An interactive image-loader node with crop-region editing and soft mask painting
 *   **Editor behavior**:
     *   `Crop` mode: drag the crop frame to move it, drag corner handles to resize it while preserving ratio.
     *   `Paint` / `Erase` modes: draw soft strokes clipped to the crop area only.
+    *   Drag and drop an image file anywhere inside the custom editor to upload it directly into the ComfyUI input folder.
     *   Mouse wheel zooms around the cursor. Space-drag or middle-mouse drag pans the viewport.
     *   `Fit` resets the viewport. `Reset Crop` restores the centered default crop for the current ratio. `Clear Mask` removes all painted strokes.
 *   **Notes**:
     *   Saved workflows persist the crop box, viewport, brush settings, and mask strokes through the hidden `editor_state_json` widget.
     *   Changing the selected image resets the editor state when the source file or source dimensions no longer match.
+    *   The editor refreshes the input image list in place and keeps the selected image synced when possible.
     *   The editor keeps crop handles, brush previews, and paint/erase points aligned across graph zoom, browser zoom, HiDPI, and fractional scaling.
     *   This first release is loader-only and does not accept an upstream `IMAGE` input.
 
 ### 5. Burve Crop + Mask Apply
 Applies a crop-region replacement back onto a full-size image using a full-size mask.
 
-*   **Functionality**: Takes a base image, a replacement image, the `crop_region_pipe` from **Burve Crop + Mask Load**, and a full-size mask. It validates the replacement image aspect ratio, resizes it to the crop rectangle, and blends only masked pixels back onto the base image.
+*   **Functionality**: Takes a base image, a replacement image, the `crop_region_pipe` from **Burve Crop + Mask Load**, and a full-size mask. It resizes the replacement image to the crop rectangle and blends only masked pixels back onto the base image.
 *   **Inputs**:
     *   `base_image`: The full-size original image that will receive the edit.
-    *   `new_image`: A single-frame image whose aspect ratio must match the crop pipe ratio. It may be any size and will always be resized to the crop rectangle.
+    *   `new_image`: A single-frame image that may be any size. Exact and near-match aspect ratios are accepted and resized to the crop rectangle.
     *   `crop_region_pipe`: The `CROP_REGION_PIPE` output from **Burve Crop + Mask Load**.
     *   `mask`: A full-size soft `MASK`. `1.0` transfers pixels from the placed image, `0.0` keeps the original base image.
+    *   `strict_aspect_ratio`: Advanced toggle. When enabled, any aspect ratio mismatch throws a hard error instead of auto-fitting.
 *   **Outputs**:
     *   `edited_image`: The base image with only masked pixels inside the crop replaced.
     *   `placed_image_white_bg`: A full-size white canvas with the resized `new_image` filling the crop rectangle.
     *   `masked_placed_image_white_bg`: A full-size white canvas where only masked pixels from the placed image are visible.
+    *   `status`: Empty on clean execution, or a warning when a near-match aspect ratio was auto-fit by centered crop.
 *   **Notes**:
     *   This node is single-frame only. `base_image`, `new_image`, and `mask` must each have batch size `1`.
     *   Mask values outside the crop rectangle are ignored even if they are nonzero.
-    *   A mismatched `new_image` aspect ratio throws a hard error instead of auto-cropping.
+    *   Near-match aspect ratios are auto-fit with centered crop when the estimated trim is at most `1.0%`.
+    *   Larger aspect mismatches still raise a friendly hard error so the workflow does not silently crop away substantial content.
 
 ### 6. Burve Debug Gemini Key
 A helper node to verify your API key configuration.

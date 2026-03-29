@@ -4,6 +4,11 @@ import {
   computeZoomAnchoredViewport,
   getLogicalCanvasMetrics,
 } from "./burve_crop_mask_geometry.js";
+import {
+  buildImageWidgetValue,
+  sameStringArray,
+  selectSyncedImageValue,
+} from "./burve_crop_mask_load_helpers.js";
 
 const TARGET_NODE = "BurveCropMaskLoad";
 const INTERNAL_WIDGET = "editor_state_json";
@@ -20,6 +25,10 @@ const CROP_STROKE = "rgba(220, 191, 122, 0.95)";
 const CROP_GRID = "rgba(220, 191, 122, 0.24)";
 const PAINT_RGBA = [56, 219, 255];
 const PAINT_MAX_ALPHA = 0.34;
+const INPUT_FILES_ROUTE = "/internal/files/input";
+const IMAGE_UPLOAD_ROUTE = "/upload/image";
+const IMAGE_SYNC_THROTTLE_MS = 1500;
+const DEFAULT_HINT_TEXT = "Wheel: zoom | Space/middle drag: pan";
 
 function injectStyles() {
   if (document.getElementById(STYLE_ID)) {
@@ -110,6 +119,14 @@ function injectStyles() {
         radial-gradient(circle at 20% 20%, rgba(63, 77, 97, 0.18), transparent 45%),
         linear-gradient(135deg, rgba(11, 14, 18, 0.95), rgba(24, 28, 35, 0.96));
       border: 1px solid rgba(255, 255, 255, 0.08);
+      transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+    }
+    .burve-crop-root.drag-upload .burve-crop-canvas-wrap {
+      border-color: rgba(158, 245, 255, 0.72);
+      box-shadow: inset 0 0 0 1px rgba(158, 245, 255, 0.2), 0 0 0 1px rgba(158, 245, 255, 0.12);
+      background:
+        radial-gradient(circle at 20% 20%, rgba(76, 119, 135, 0.26), transparent 45%),
+        linear-gradient(135deg, rgba(13, 22, 28, 0.97), rgba(23, 34, 42, 0.98));
     }
     .burve-crop-canvas {
       width: 100%;
@@ -314,9 +331,16 @@ class CropMaskEditor {
     this.hoverHandle = null;
     this.spacePressed = false;
     this.saveTimer = null;
+    this.statusTimer = null;
     this.lastWidgetImage = null;
     this.lastWidgetRatio = null;
     this.lastLoadedUrl = null;
+    this.lastImageSyncAt = 0;
+    this.syncInFlight = false;
+    this.dragDepth = 0;
+    this.dragActive = false;
+    this.statusOverride = "";
+    this.destroyed = false;
     injectStyles();
     this.root = document.createElement("div");
     this.root.className = "burve-crop-root";
@@ -349,6 +373,7 @@ class CropMaskEditor {
     this.toolbar = this.root.querySelector(".burve-crop-toolbar");
     this.statusBar = this.root.querySelector(".burve-crop-status");
     this.cropInfo = this.root.querySelector('[data-role="crop-info"]');
+    this.hintText = this.root.querySelector('[data-role="hint"]');
     this.brushSizeInput = this.root.querySelector('[data-role="brush-size"]');
     this.brushValue = this.root.querySelector('[data-role="brush-value"]');
     this.softnessInput = this.root.querySelector('[data-role="softness"]');
@@ -396,6 +421,12 @@ class CropMaskEditor {
     this.canvas.addEventListener("pointercancel", (event) => this.onPointerUp(event));
     this.canvas.addEventListener("pointerleave", () => this.onPointerLeave());
     this.canvas.addEventListener("wheel", (event) => this.onWheel(event), { passive: false });
+    this.root.addEventListener("dragenter", this.onDragEnter);
+    this.root.addEventListener("dragover", this.onDragOver);
+    this.root.addEventListener("dragleave", this.onDragLeave);
+    this.root.addEventListener("drop", this.onDrop);
+    this.root.addEventListener("pointerenter", this.onInteractionSync);
+    this.root.addEventListener("focusin", this.onInteractionSync);
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
 
@@ -412,6 +443,7 @@ class CropMaskEditor {
     this.installWidgetCallbacks();
     this.updateBrushValue();
     this.refreshFromWidgets(true);
+    void this.syncImageOptions({ force: true });
     this.updateNodeSize();
   }
 
@@ -429,7 +461,64 @@ class CropMaskEditor {
     }
   };
 
+  onInteractionSync = () => {
+    void this.syncImageOptions();
+  };
+
+  onDragEnter = (event) => {
+    if (!this.isImageFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    this.dragDepth += 1;
+    this.setDragActive(true);
+  };
+
+  onDragOver = (event) => {
+    if (!this.isImageFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "copy";
+    }
+    this.setDragActive(true);
+  };
+
+  onDragLeave = (event) => {
+    if (!this.isImageFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    this.dragDepth = Math.max(0, this.dragDepth - 1);
+    if (this.dragDepth === 0) {
+      this.setDragActive(false);
+    }
+  };
+
+  onDrop = (event) => {
+    const file = this.getDroppedImageFile(event);
+    if (!file) {
+      this.dragDepth = 0;
+      this.setDragActive(false);
+      return;
+    }
+    event.preventDefault();
+    this.dragDepth = 0;
+    this.setDragActive(false);
+    void this.uploadDroppedImage(file);
+  };
+
   destroy() {
+    this.destroyed = true;
+    window.clearTimeout(this.saveTimer);
+    window.clearTimeout(this.statusTimer);
+    this.root.removeEventListener("dragenter", this.onDragEnter);
+    this.root.removeEventListener("dragover", this.onDragOver);
+    this.root.removeEventListener("dragleave", this.onDragLeave);
+    this.root.removeEventListener("drop", this.onDrop);
+    this.root.removeEventListener("pointerenter", this.onInteractionSync);
+    this.root.removeEventListener("focusin", this.onInteractionSync);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
   }
@@ -505,6 +594,174 @@ class CropMaskEditor {
 
   getImageValue() {
     return this.imageWidget?.value || "";
+  }
+
+  getImageOptions() {
+    const values = this.imageWidget?.options?.values;
+    return Array.isArray(values) ? values.map((value) => String(value)) : [];
+  }
+
+  setImageOptions(nextOptions) {
+    if (!this.imageWidget) {
+      return;
+    }
+    this.imageWidget.options = this.imageWidget.options || {};
+    this.imageWidget.options.values = nextOptions.map((value) => String(value));
+  }
+
+  setImageWidgetValue(nextValue, { forceRefresh = false } = {}) {
+    if (!this.imageWidget) {
+      return;
+    }
+    const normalized = String(nextValue || "");
+    const previousValue = this.getImageValue();
+    if (!forceRefresh && normalized === previousValue) {
+      return;
+    }
+    this.imageWidget.value = normalized;
+    this.node.onWidgetChanged?.(this.imageWidget.name ?? "image", normalized, previousValue, this.imageWidget);
+    this.refreshFromWidgets(true);
+    app.graph?.setDirtyCanvas?.(true, true);
+  }
+
+  setStatusOverride(message, timeoutMs = 0) {
+    this.statusOverride = String(message || "");
+    window.clearTimeout(this.statusTimer);
+    if (timeoutMs > 0 && this.statusOverride) {
+      this.statusTimer = window.setTimeout(() => {
+        if (this.destroyed) {
+          return;
+        }
+        this.statusOverride = "";
+        this.draw();
+      }, timeoutMs);
+    }
+    this.draw();
+  }
+
+  setDragActive(active) {
+    if (this.dragActive === active) {
+      return;
+    }
+    this.dragActive = active;
+    this.root.classList.toggle("drag-upload", active);
+    if (this.hintText) {
+      this.hintText.textContent = active ? "Drop image to upload" : DEFAULT_HINT_TEXT;
+    }
+  }
+
+  isImageFileDrag(event) {
+    const transfer = event.dataTransfer;
+    if (!transfer) {
+      return false;
+    }
+    if (transfer.items?.length) {
+      return [...transfer.items].some((item) => item.kind === "file" && String(item.type || "").startsWith("image/"));
+    }
+    if (transfer.files?.length) {
+      return [...transfer.files].some((file) => String(file.type || "").startsWith("image/"));
+    }
+    return false;
+  }
+
+  getDroppedImageFile(event) {
+    const transfer = event.dataTransfer;
+    if (!transfer) {
+      return null;
+    }
+    if (transfer.files?.length) {
+      return [...transfer.files].find((file) => String(file.type || "").startsWith("image/")) ?? null;
+    }
+    return null;
+  }
+
+  async syncImageOptions({ force = false, preferredValue = "", showErrorStatus = false } = {}) {
+    if (!this.imageWidget || this.destroyed) {
+      return [];
+    }
+    const now = Date.now();
+    if (!force && (this.syncInFlight || now - this.lastImageSyncAt < IMAGE_SYNC_THROTTLE_MS)) {
+      return this.getImageOptions();
+    }
+
+    this.syncInFlight = true;
+    try {
+      const response = await fetch(INPUT_FILES_ROUTE, { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error(`Image list refresh failed with status ${response.status}`);
+      }
+      const payload = await response.json();
+      if (this.destroyed) {
+        return [];
+      }
+
+      const nextOptions = Array.isArray(payload) ? payload.map((value) => String(value)) : [];
+      const currentOptions = this.getImageOptions();
+      const optionsChanged = !sameStringArray(currentOptions, nextOptions);
+      if (optionsChanged) {
+        this.setImageOptions(nextOptions);
+      }
+
+      const nextValue = selectSyncedImageValue({
+        preferredValue,
+        currentValue: this.getImageValue(),
+        nextOptions,
+      });
+      if (optionsChanged || nextValue !== this.getImageValue()) {
+        this.setImageWidgetValue(nextValue, { forceRefresh: optionsChanged });
+      }
+
+      this.lastImageSyncAt = Date.now();
+      return nextOptions;
+    } catch (error) {
+      console.error("[Burve Crop + Mask Load] Failed to refresh input images.", error);
+      if (showErrorStatus) {
+        this.setStatusOverride("Image list refresh failed", 2200);
+      }
+      return this.getImageOptions();
+    } finally {
+      this.syncInFlight = false;
+    }
+  }
+
+  async uploadDroppedImage(file) {
+    this.setStatusOverride("Uploading...");
+    try {
+      const formData = new FormData();
+      formData.set("image", file, file.name);
+      formData.set("type", "input");
+
+      const response = await fetch(IMAGE_UPLOAD_ROUTE, {
+        method: "POST",
+        body: formData,
+      });
+      if (!response.ok) {
+        throw new Error(`Image upload failed with status ${response.status}`);
+      }
+      const payload = await response.json();
+      if (this.destroyed) {
+        return;
+      }
+
+      const uploadedValue = buildImageWidgetValue(payload);
+      const nextOptions = await this.syncImageOptions({
+        force: true,
+        preferredValue: uploadedValue,
+        showErrorStatus: true,
+      });
+      if (!this.destroyed && uploadedValue) {
+        if (!nextOptions.includes(uploadedValue)) {
+          this.setImageOptions([uploadedValue, ...nextOptions]);
+        }
+        this.setImageWidgetValue(uploadedValue, { forceRefresh: true });
+      }
+      this.setStatusOverride("");
+    } catch (error) {
+      console.error("[Burve Crop + Mask Load] Failed to upload dropped image.", error);
+      if (!this.destroyed) {
+        this.setStatusOverride("Upload failed", 2600);
+      }
+    }
   }
 
   readStoredState() {
@@ -1305,7 +1562,7 @@ class CropMaskEditor {
     this.ctx.clearRect(0, 0, this.stageMetrics.cssWidth, this.stageMetrics.cssHeight);
 
     if (!this.sourceImage) {
-      this.cropInfo.textContent = "No image selected";
+      this.cropInfo.textContent = this.statusOverride || "No image selected";
       this.ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
       this.ctx.font = "16px Georgia";
       this.ctx.fillText("Select an input image to begin.", 24, 36);
@@ -1332,7 +1589,9 @@ class CropMaskEditor {
     this.ctx.restore();
 
     const crop = this.state.crop;
-    this.cropInfo.textContent = `${crop.width}x${crop.height} px | ${this.getRatioValue()} | ${this.tool} | brush ${Number(this.brushSizeInput.value)} px | ${this.state.strokes.length} stroke(s)`;
+    this.cropInfo.textContent =
+      this.statusOverride ||
+      `${crop.width}x${crop.height} px | ${this.getRatioValue()} | ${this.tool} | brush ${Number(this.brushSizeInput.value)} px | ${this.state.strokes.length} stroke(s)`;
   }
 }
 
