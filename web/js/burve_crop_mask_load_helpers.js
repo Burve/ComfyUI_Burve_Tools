@@ -10,6 +10,19 @@ export function buildImageWidgetValue(uploadResult) {
   return subfolder ? `${subfolder}/${name}` : name;
 }
 
+function normalizeImageOptionQuery(query) {
+  return String(query || "").trim().toLowerCase();
+}
+
+export function filterImageOptions({ nextOptions = [], query = "" }) {
+  const normalizedOptions = Array.isArray(nextOptions) ? nextOptions.map((value) => String(value)) : [];
+  const normalizedQuery = normalizeImageOptionQuery(query);
+  if (!normalizedQuery) {
+    return normalizedOptions;
+  }
+  return normalizedOptions.filter((value) => value.toLowerCase().includes(normalizedQuery));
+}
+
 export function selectSyncedImageValue({ preferredValue = "", currentValue = "", nextOptions = [] }) {
   const normalizedOptions = Array.isArray(nextOptions) ? nextOptions.map((value) => String(value)) : [];
   const preferred = String(preferredValue || "");

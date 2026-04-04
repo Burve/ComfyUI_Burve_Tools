@@ -176,7 +176,7 @@ def ensure_google_genai_compatibility() -> None:
         if missing_symbols:
             details.append(f"missing symbols: {', '.join(missing_symbols)}")
         raise RuntimeError(
-            "ComfyUI_Burve_Tools 2.1.0 requires google-genai>=1.68.0,<2 for the "
+            "ComfyUI_Burve_Tools 2.3.0 requires google-genai>=1.68.0,<2 for the "
             "Gemini DynamicCombo nodes.\n" + "\n".join(details)
         )
 

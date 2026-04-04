@@ -91,7 +91,7 @@ BUILTIN_IO_TYPES = {
 def ensure_dynamic_combo_support() -> None:
     if not hasattr(IO, "DynamicCombo") or not hasattr(IO.DynamicCombo, "Input"):
         raise RuntimeError(
-            "ComfyUI_Burve_Tools 2.2.0 requires a DynamicCombo-capable ComfyUI build "
+            "ComfyUI_Burve_Tools 2.3.0 requires a DynamicCombo-capable ComfyUI build "
             "with comfy_api.latest.IO.DynamicCombo.Input available."
         )
 

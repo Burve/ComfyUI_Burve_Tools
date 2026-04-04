@@ -74,15 +74,19 @@ An interactive image-loader node with crop-region editing and soft mask painting
     *   `aspect_ratio`: The selected ratio string, suitable for plugging into `aspect_ratio_override` on compatible Burve image-generation workflows.
     *   `crop_region_pipe`: A `CROP_REGION_PIPE` bundle carrying source size, selected aspect ratio, and pixel crop rect for a future downstream region-aware node.
 *   **Editor behavior**:
+    *   `List` / `Grid` switches the inline image picker between a filtered text list and thumbnail cards.
     *   `Crop` mode: drag the crop frame to move it, drag corner handles to resize it while preserving ratio.
     *   `Paint` / `Erase` modes: draw soft strokes clipped to the crop area only.
     *   Drag and drop an image file anywhere inside the custom editor to upload it directly into the ComfyUI input folder.
+    *   `Upload` opens a file picker that uses the same in-editor upload flow as drag-and-drop. `Refresh` re-syncs the input folder list without leaving the node.
     *   Mouse wheel zooms around the cursor. Space-drag or middle-mouse drag pans the viewport.
     *   `Fit` resets the viewport. `Reset Crop` restores the centered default crop for the current ratio. `Clear Mask` removes all painted strokes.
 *   **Notes**:
     *   Saved workflows persist the crop box, viewport, brush settings, and mask strokes through the hidden `editor_state_json` widget.
+    *   The selected input image still persists through the hidden native `image` widget, so existing workflows remain compatible.
     *   Changing the selected image resets the editor state when the source file or source dimensions no longer match.
     *   The editor refreshes the input image list in place and keeps the selected image synced when possible.
+    *   The image picker mode is remembered globally in the frontend setting `Burve.CropMaskLoad.ImagePickerMode` and defaults to `list`.
     *   The editor keeps crop handles, brush previews, and paint/erase points aligned across graph zoom, browser zoom, HiDPI, and fractional scaling.
     *   This first release is loader-only and does not accept an upstream `IMAGE` input.
 

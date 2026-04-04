@@ -26,6 +26,44 @@ test("buildImageWidgetValue prefixes nested subfolders", async () => {
   assert.equal(buildImageWidgetValue({ name: "x.png", subfolder: "nested" }), "nested/x.png");
 });
 
+test("filterImageOptions returns all options for an empty query", async () => {
+  const { filterImageOptions } = await loadHelperModule();
+  assert.deepEqual(filterImageOptions({ nextOptions: ["a.png", "nested/b.png"], query: "" }), ["a.png", "nested/b.png"]);
+});
+
+test("filterImageOptions matches root filenames", async () => {
+  const { filterImageOptions } = await loadHelperModule();
+  assert.deepEqual(
+    filterImageOptions({
+      nextOptions: ["portrait.png", "nested/landscape.png", "mask.webp"],
+      query: "mask",
+    }),
+    ["mask.webp"]
+  );
+});
+
+test("filterImageOptions matches nested paths", async () => {
+  const { filterImageOptions } = await loadHelperModule();
+  assert.deepEqual(
+    filterImageOptions({
+      nextOptions: ["portrait.png", "nested/landscape.png", "nested/deeper/mask.webp"],
+      query: "nested/deeper",
+    }),
+    ["nested/deeper/mask.webp"]
+  );
+});
+
+test("filterImageOptions is case-insensitive", async () => {
+  const { filterImageOptions } = await loadHelperModule();
+  assert.deepEqual(
+    filterImageOptions({
+      nextOptions: ["Portrait.PNG", "nested/Landscape.png", "mask.webp"],
+      query: "portrait",
+    }),
+    ["Portrait.PNG"]
+  );
+});
+
 test("selectSyncedImageValue keeps the current selection when it still exists", async () => {
   const { selectSyncedImageValue } = await loadHelperModule();
   assert.equal(
@@ -57,5 +95,20 @@ test("selectSyncedImageValue falls back to the first option when the current sel
       nextOptions: ["first.png", "second.png"],
     }),
     "first.png"
+  );
+});
+
+test("selectSyncedImageValue retains the current selection after filtering and sync", async () => {
+  const { filterImageOptions, selectSyncedImageValue } = await loadHelperModule();
+  const filteredOptions = filterImageOptions({
+    nextOptions: ["portrait.png", "nested/keep.png", "other.png"],
+    query: "keep",
+  });
+  assert.equal(
+    selectSyncedImageValue({
+      currentValue: "nested/keep.png",
+      nextOptions: filteredOptions,
+    }),
+    "nested/keep.png"
   );
 });

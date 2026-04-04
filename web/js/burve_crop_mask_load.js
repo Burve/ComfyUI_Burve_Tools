@@ -6,6 +6,7 @@ import {
 } from "./burve_crop_mask_geometry.js";
 import {
   buildImageWidgetValue,
+  filterImageOptions,
   sameStringArray,
   selectSyncedImageValue,
 } from "./burve_crop_mask_load_helpers.js";
@@ -29,6 +30,59 @@ const INPUT_FILES_ROUTE = "/internal/files/input";
 const IMAGE_UPLOAD_ROUTE = "/upload/image";
 const IMAGE_SYNC_THROTTLE_MS = 1500;
 const DEFAULT_HINT_TEXT = "Wheel: zoom | Space/middle drag: pan";
+const IMAGE_PICKER_MODE_SETTING_ID = "Burve.CropMaskLoad.ImagePickerMode";
+const IMAGE_PICKER_MODE_EVENT = "burve-crop-mask-load:image-picker-mode";
+const DEFAULT_IMAGE_PICKER_MODE = "list";
+const IMAGE_PICKER_BODY_HEIGHT = 188;
+const IMAGE_PICKER_LIST_ROWS = 7;
+let fallbackImagePickerMode = DEFAULT_IMAGE_PICKER_MODE;
+
+function sanitizePickerMode(value) {
+  return value === "grid" ? "grid" : DEFAULT_IMAGE_PICKER_MODE;
+}
+
+function dispatchPickerModeChange(mode) {
+  window.dispatchEvent(new CustomEvent(IMAGE_PICKER_MODE_EVENT, { detail: sanitizePickerMode(mode) }));
+}
+
+function readPickerModeSetting() {
+  const extensionValue = app.extensionManager?.setting?.get?.(IMAGE_PICKER_MODE_SETTING_ID);
+  if (extensionValue != null) {
+    return sanitizePickerMode(extensionValue);
+  }
+  const legacyValue = app.ui?.settings?.getSettingValue?.(IMAGE_PICKER_MODE_SETTING_ID);
+  if (legacyValue != null) {
+    return sanitizePickerMode(legacyValue);
+  }
+  return sanitizePickerMode(fallbackImagePickerMode);
+}
+
+function persistPickerModeSetting(mode) {
+  const nextMode = sanitizePickerMode(mode);
+  fallbackImagePickerMode = nextMode;
+  if (app.extensionManager?.setting?.set) {
+    app.extensionManager.setting.set(IMAGE_PICKER_MODE_SETTING_ID, nextMode);
+    return;
+  }
+  if (app.ui?.settings?.setSettingValue) {
+    app.ui.settings.setSettingValue(IMAGE_PICKER_MODE_SETTING_ID, nextMode);
+    dispatchPickerModeChange(nextMode);
+    return;
+  }
+  dispatchPickerModeChange(nextMode);
+}
+
+function splitImagePathParts(imageValue) {
+  const normalized = String(imageValue || "").replace(/\\/g, "/");
+  const slashIndex = normalized.lastIndexOf("/");
+  if (slashIndex < 0) {
+    return { filename: normalized, subfolder: "" };
+  }
+  return {
+    filename: normalized.slice(slashIndex + 1),
+    subfolder: normalized.slice(0, slashIndex),
+  };
+}
 
 function injectStyles() {
   if (document.getElementById(STYLE_ID)) {
@@ -72,7 +126,9 @@ function injectStyles() {
       color: #dcbf7a;
       margin-right: auto;
     }
-    .burve-crop-toolbar button {
+    .burve-crop-toolbar button,
+    .burve-crop-picker-bar button,
+    .burve-crop-picker-mode button {
       border: 1px solid rgba(220, 191, 122, 0.28);
       background: rgba(255, 255, 255, 0.04);
       color: #f4efe6;
@@ -82,7 +138,9 @@ function injectStyles() {
       font-size: 12px;
       transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
     }
-    .burve-crop-toolbar button.active {
+    .burve-crop-toolbar button.active,
+    .burve-crop-picker-bar button.active,
+    .burve-crop-picker-mode button.active {
       background: rgba(220, 191, 122, 0.18);
       border-color: rgba(220, 191, 122, 0.65);
       box-shadow: 0 0 0 1px rgba(220, 191, 122, 0.2) inset;
@@ -106,6 +164,232 @@ function injectStyles() {
       justify-content: flex-end;
       color: #9ef5ff;
       font-variant-numeric: tabular-nums;
+    }
+    .burve-crop-picker {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      background:
+        linear-gradient(180deg, rgba(24, 27, 31, 0.92), rgba(16, 18, 22, 0.94)),
+        radial-gradient(circle at 20% 0%, rgba(220, 191, 122, 0.08), transparent 45%);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }
+    .burve-crop-picker-bar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .burve-crop-picker-mode {
+      display: inline-flex;
+      gap: 6px;
+      padding-right: 4px;
+      margin-right: 4px;
+      border-right: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .burve-crop-picker-bar button,
+    .burve-crop-picker-mode button {
+      padding: 5px 10px;
+      font-size: 11px;
+    }
+    .burve-crop-picker-filter {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 180px;
+      min-width: 160px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.04);
+      color: #d7dce4;
+      font-size: 11px;
+    }
+    .burve-crop-picker-filter input {
+      flex: 1 1 auto;
+      min-width: 0;
+      border: 0;
+      outline: none;
+      background: transparent;
+      color: #f4efe6;
+      font-size: 12px;
+      font-family: inherit;
+    }
+    .burve-crop-picker-filter input::placeholder {
+      color: rgba(185, 192, 203, 0.72);
+    }
+    .burve-crop-picker-count {
+      margin-left: auto;
+      color: #9ef5ff;
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .burve-crop-picker-body {
+      position: relative;
+      height: ${IMAGE_PICKER_BODY_HEIGHT}px;
+      min-height: ${IMAGE_PICKER_BODY_HEIGHT}px;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      background:
+        linear-gradient(180deg, rgba(12, 14, 17, 0.96), rgba(19, 22, 27, 0.96));
+    }
+    .burve-crop-image-list,
+    .burve-crop-image-grid,
+    .burve-crop-picker-empty {
+      position: absolute;
+      inset: 0;
+    }
+    .burve-crop-image-list[hidden],
+    .burve-crop-image-grid[hidden],
+    .burve-crop-picker-empty[hidden] {
+      display: none;
+    }
+    .burve-crop-image-list {
+      width: 100%;
+      height: 100%;
+      padding: 8px;
+      border: 0;
+      outline: none;
+      background: rgba(12, 14, 17, 0.98);
+      color: #f4efe6;
+      font-size: 12px;
+      font-family: inherit;
+      box-sizing: border-box;
+      color-scheme: dark;
+    }
+    .burve-crop-image-list option {
+      padding: 7px 9px;
+      border-radius: 8px;
+      margin-bottom: 2px;
+    }
+    .burve-crop-image-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+      grid-auto-rows: max-content;
+      gap: 10px;
+      height: 100%;
+      min-height: 0;
+      align-content: start;
+      align-items: start;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 10px;
+      box-sizing: border-box;
+    }
+    .burve-crop-thumb {
+      display: block;
+      width: 100%;
+      min-width: 0;
+      align-self: start;
+      padding: 6px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(255, 255, 255, 0.03);
+      color: #f4efe6;
+      text-align: left;
+      cursor: pointer;
+      overflow: hidden;
+      box-sizing: border-box;
+      user-select: none;
+      outline: none;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+    .burve-crop-thumb:hover {
+      transform: translateY(-1px);
+      border-color: rgba(220, 191, 122, 0.42);
+      background: rgba(255, 255, 255, 0.05);
+    }
+    .burve-crop-thumb.active {
+      border-color: rgba(158, 245, 255, 0.68);
+      box-shadow: inset 0 0 0 1px rgba(158, 245, 255, 0.24);
+      background: linear-gradient(180deg, rgba(30, 56, 63, 0.44), rgba(255, 255, 255, 0.05));
+    }
+    .burve-crop-thumb:focus-visible {
+      border-color: rgba(158, 245, 255, 0.82);
+      box-shadow:
+        0 0 0 1px rgba(158, 245, 255, 0.38) inset,
+        0 0 0 2px rgba(158, 245, 255, 0.16);
+    }
+    .burve-crop-thumb-preview-frame {
+      position: relative;
+      display: block;
+      width: 100%;
+      min-width: 0;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .burve-crop-thumb-preview-sizer {
+      display: block;
+      width: 100%;
+      padding-top: 100%;
+      pointer-events: none;
+    }
+    .burve-crop-thumb-preview,
+    .burve-crop-thumb-fallback {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      overflow: hidden;
+      background:
+        linear-gradient(135deg, rgba(37, 42, 50, 0.96), rgba(19, 23, 29, 0.96));
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      box-sizing: border-box;
+    }
+    .burve-crop-thumb-preview img {
+      display: block;
+      width: auto;
+      height: auto;
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      object-position: center;
+      pointer-events: none;
+    }
+    .burve-crop-thumb-fallback {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #b9c0cb;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .burve-crop-thumb-label {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 1;
+      display: block;
+      padding: 12px 8px 7px;
+      box-sizing: border-box;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #f4efe6;
+      font-size: 11px;
+      line-height: 1.2;
+      pointer-events: none;
+      background: linear-gradient(180deg, rgba(10, 12, 15, 0), rgba(10, 12, 15, 0.9));
+    }
+    .burve-crop-picker-empty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      box-sizing: border-box;
+      text-align: center;
+      color: #b9c0cb;
+      font-size: 12px;
+      line-height: 1.45;
     }
     .burve-crop-canvas-wrap {
       position: relative;
@@ -340,6 +624,9 @@ class CropMaskEditor {
     this.dragDepth = 0;
     this.dragActive = false;
     this.statusOverride = "";
+    this.imageFilterQuery = "";
+    this.imagePickerMode = readPickerModeSetting();
+    this.failedThumbnailUrls = new Set();
     this.destroyed = false;
     injectStyles();
     this.root = document.createElement("div");
@@ -356,6 +643,27 @@ class CropMaskEditor {
         <button data-action="reset-crop">Reset Crop</button>
         <button data-action="clear-mask">Clear Mask</button>
       </div>
+      <div class="burve-crop-picker">
+        <div class="burve-crop-picker-bar">
+          <div class="burve-crop-picker-mode" role="tablist" aria-label="Image picker mode">
+            <button type="button" data-picker-mode="list">List</button>
+            <button type="button" data-picker-mode="grid">Grid</button>
+          </div>
+          <button type="button" data-role="upload-image">Upload</button>
+          <button type="button" data-role="refresh-images">Refresh</button>
+          <label class="burve-crop-picker-filter">
+            <span>Filter</span>
+            <input data-role="image-filter" type="text" placeholder="Filter input images" />
+          </label>
+          <span class="burve-crop-picker-count" data-role="image-count">0 images</span>
+        </div>
+        <input data-role="image-file-input" type="file" accept="image/*" hidden />
+        <div class="burve-crop-picker-body">
+          <select class="burve-crop-image-list" data-role="image-list" size="${IMAGE_PICKER_LIST_ROWS}"></select>
+          <div class="burve-crop-image-grid" data-role="image-grid" hidden></div>
+          <div class="burve-crop-picker-empty" data-role="image-empty" hidden>No input images available.</div>
+        </div>
+      </div>
       <div class="burve-crop-canvas-wrap">
         <canvas class="burve-crop-canvas"></canvas>
       </div>
@@ -371,6 +679,7 @@ class CropMaskEditor {
     this.overlayCanvas = document.createElement("canvas");
     this.overlayCtx = this.overlayCanvas.getContext("2d");
     this.toolbar = this.root.querySelector(".burve-crop-toolbar");
+    this.pickerPanel = this.root.querySelector(".burve-crop-picker");
     this.statusBar = this.root.querySelector(".burve-crop-status");
     this.cropInfo = this.root.querySelector('[data-role="crop-info"]');
     this.hintText = this.root.querySelector('[data-role="hint"]');
@@ -379,8 +688,17 @@ class CropMaskEditor {
     this.softnessInput = this.root.querySelector('[data-role="softness"]');
     this.toolButtons = [...this.root.querySelectorAll("[data-tool]")];
     this.actionButtons = [...this.root.querySelectorAll("[data-action]")];
+    this.pickerModeButtons = [...this.root.querySelectorAll("[data-picker-mode]")];
+    this.pickerFilterInput = this.root.querySelector('[data-role="image-filter"]');
+    this.pickerCount = this.root.querySelector('[data-role="image-count"]');
+    this.imageListSelect = this.root.querySelector('[data-role="image-list"]');
+    this.imageGrid = this.root.querySelector('[data-role="image-grid"]');
+    this.pickerEmpty = this.root.querySelector('[data-role="image-empty"]');
+    this.pickerFileInput = this.root.querySelector('[data-role="image-file-input"]');
+    this.uploadImageButton = this.root.querySelector('[data-role="upload-image"]');
+    this.refreshImagesButton = this.root.querySelector('[data-role="refresh-images"]');
     this.tool = "crop";
-    this.widgetHeight = CANVAS_MIN_HEIGHT + 180;
+    this.widgetHeight = CANVAS_MIN_HEIGHT + IMAGE_PICKER_BODY_HEIGHT + 160;
     this.stageMetrics = {
       cssWidth: 320,
       cssHeight: CANVAS_MIN_HEIGHT,
@@ -389,6 +707,7 @@ class CropMaskEditor {
       clientToLogicalScaleX: 1,
       clientToLogicalScaleY: 1,
       toolbarHeight: 0,
+      pickerHeight: 0,
       statusHeight: 0,
       paddingTop: 0,
       paddingBottom: 0,
@@ -400,6 +719,9 @@ class CropMaskEditor {
     });
     this.actionButtons.forEach((button) => {
       button.addEventListener("click", () => this.handleAction(button.dataset.action));
+    });
+    this.pickerModeButtons.forEach((button) => {
+      button.addEventListener("click", () => this.setImagePickerMode(button.dataset.pickerMode));
     });
     this.brushSizeInput.addEventListener("input", () => {
       this.ensureState();
@@ -414,6 +736,34 @@ class CropMaskEditor {
       this.scheduleSave();
       this.draw();
     });
+    this.pickerFilterInput.addEventListener("input", () => {
+      this.imageFilterQuery = this.pickerFilterInput.value;
+      this.renderImagePicker();
+    });
+    const handleListSelection = () => {
+      if (this.imageListSelect.value) {
+        this.setImageWidgetValue(this.imageListSelect.value);
+      }
+    };
+    this.imageListSelect.addEventListener("input", handleListSelection);
+    this.imageListSelect.addEventListener("change", handleListSelection);
+    this.uploadImageButton.addEventListener("click", () => {
+      this.pickerFileInput?.click();
+    });
+    this.refreshImagesButton.addEventListener("click", () => {
+      void this.syncImageOptions({ force: true, showErrorStatus: true });
+    });
+    this.pickerFileInput.addEventListener("change", () => {
+      const file = this.pickerFileInput?.files?.[0] ?? null;
+      this.pickerFileInput.value = "";
+      if (file) {
+        void this.uploadDroppedImage(file);
+      }
+    });
+    this.pickerPanel.addEventListener("pointerdown", (event) => event.stopPropagation());
+    this.pickerPanel.addEventListener("click", (event) => event.stopPropagation());
+    this.pickerPanel.addEventListener("dblclick", (event) => event.stopPropagation());
+    this.pickerPanel.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
 
     this.canvas.addEventListener("pointerdown", (event) => this.onPointerDown(event));
     this.canvas.addEventListener("pointermove", (event) => this.onPointerMove(event));
@@ -425,8 +775,7 @@ class CropMaskEditor {
     this.root.addEventListener("dragover", this.onDragOver);
     this.root.addEventListener("dragleave", this.onDragLeave);
     this.root.addEventListener("drop", this.onDrop);
-    this.root.addEventListener("pointerenter", this.onInteractionSync);
-    this.root.addEventListener("focusin", this.onInteractionSync);
+    window.addEventListener(IMAGE_PICKER_MODE_EVENT, this.onExternalPickerModeChange);
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
 
@@ -440,8 +789,10 @@ class CropMaskEditor {
     });
     this.domWidget.serialize = false;
     this.hideStateWidget();
+    this.hideImageWidget();
     this.installWidgetCallbacks();
     this.updateBrushValue();
+    this.setImagePickerMode(this.imagePickerMode, { persist: false });
     this.refreshFromWidgets(true);
     void this.syncImageOptions({ force: true });
     this.updateNodeSize();
@@ -461,8 +812,8 @@ class CropMaskEditor {
     }
   };
 
-  onInteractionSync = () => {
-    void this.syncImageOptions();
+  onExternalPickerModeChange = (event) => {
+    this.setImagePickerMode(event?.detail, { persist: false });
   };
 
   onDragEnter = (event) => {
@@ -517,15 +868,14 @@ class CropMaskEditor {
     this.root.removeEventListener("dragover", this.onDragOver);
     this.root.removeEventListener("dragleave", this.onDragLeave);
     this.root.removeEventListener("drop", this.onDrop);
-    this.root.removeEventListener("pointerenter", this.onInteractionSync);
-    this.root.removeEventListener("focusin", this.onInteractionSync);
+    window.removeEventListener(IMAGE_PICKER_MODE_EVENT, this.onExternalPickerModeChange);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
   }
 
   updateNodeSize() {
     this.node.size = [
-      Math.max(this.node.size?.[0] ?? 0, 520),
+      Math.max(this.node.size?.[0] ?? 0, 560),
       Math.max(this.node.size?.[1] ?? 0, Math.ceil(this.widgetHeight + 48)),
     ];
   }
@@ -536,6 +886,14 @@ class CropMaskEditor {
     }
     this.stateWidget.hidden = true;
     this.stateWidget.computeSize = () => [0, -4];
+  }
+
+  hideImageWidget() {
+    if (!this.imageWidget || !this.imageListSelect || !this.imageGrid) {
+      return;
+    }
+    this.imageWidget.hidden = true;
+    this.imageWidget.computeSize = () => [0, -4];
   }
 
   installWidgetCallbacks() {
@@ -556,6 +914,144 @@ class CropMaskEditor {
     if (this.brushValue) {
       this.brushValue.textContent = `${Number(this.brushSizeInput.value)}px`;
     }
+  }
+
+  setImagePickerMode(mode, { persist = true } = {}) {
+    const nextMode = sanitizePickerMode(mode);
+    this.imagePickerMode = nextMode;
+    this.root.dataset.pickerMode = nextMode;
+    this.pickerModeButtons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.pickerMode === nextMode);
+      button.setAttribute("aria-pressed", button.dataset.pickerMode === nextMode ? "true" : "false");
+    });
+    if (persist) {
+      persistPickerModeSetting(nextMode);
+    }
+    this.renderImagePicker();
+  }
+
+  getFilteredImageOptions() {
+    return filterImageOptions({
+      nextOptions: this.getImageOptions(),
+      query: this.imageFilterQuery,
+    });
+  }
+
+  renderImagePicker() {
+    if (!this.imageListSelect || !this.imageGrid || !this.pickerEmpty) {
+      return;
+    }
+
+    const allOptions = this.getImageOptions();
+    const filteredOptions = this.getFilteredImageOptions();
+    const currentValue = this.getImageValue();
+    const normalizedQuery = String(this.imageFilterQuery || "").trim();
+    const emptyMessage = allOptions.length
+      ? `No images match "${normalizedQuery || "the current filter"}".`
+      : "No input images available. Use Upload or drag an image into the editor.";
+
+    if (this.pickerCount) {
+      this.pickerCount.textContent = normalizedQuery
+        ? `${filteredOptions.length}/${allOptions.length} images`
+        : `${allOptions.length} image${allOptions.length === 1 ? "" : "s"}`;
+    }
+
+    this.pickerModeButtons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.pickerMode === this.imagePickerMode);
+    });
+
+    this.imageListSelect.hidden = this.imagePickerMode !== "list" || filteredOptions.length === 0;
+    this.imageGrid.hidden = this.imagePickerMode !== "grid" || filteredOptions.length === 0;
+    this.pickerEmpty.hidden = filteredOptions.length > 0;
+    this.pickerEmpty.textContent = emptyMessage;
+
+    if (filteredOptions.length === 0) {
+      this.imageListSelect.replaceChildren();
+      this.imageGrid.replaceChildren();
+      return;
+    }
+
+    if (this.imagePickerMode === "list") {
+      this.renderImageList(filteredOptions, currentValue);
+      this.imageGrid.replaceChildren();
+    } else {
+      this.renderImageGrid(filteredOptions, currentValue);
+      this.imageListSelect.replaceChildren();
+    }
+  }
+
+  renderImageList(imageOptions, currentValue) {
+    const fragment = document.createDocumentFragment();
+    imageOptions.forEach((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      option.title = value;
+      fragment.appendChild(option);
+    });
+    this.imageListSelect.replaceChildren(fragment);
+    this.imageListSelect.value = imageOptions.includes(currentValue) ? currentValue : "";
+  }
+
+  renderImageGrid(imageOptions, currentValue) {
+    const fragment = document.createDocumentFragment();
+    imageOptions.forEach((value) => {
+      fragment.appendChild(this.createThumbnailCard(value, value === currentValue));
+    });
+    this.imageGrid.replaceChildren(fragment);
+  }
+
+  createThumbnailCard(imageValue, selected) {
+    const { filename } = splitImagePathParts(imageValue);
+    const viewUrl = buildViewUrl(imageValue);
+    const card = document.createElement("div");
+    card.className = "burve-crop-thumb";
+    card.title = imageValue;
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
+    card.setAttribute("aria-pressed", selected ? "true" : "false");
+    card.classList.toggle("active", selected);
+    card.addEventListener("click", () => this.setImageWidgetValue(imageValue));
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        this.setImageWidgetValue(imageValue);
+      }
+    });
+
+    const previewFrame = document.createElement("div");
+    previewFrame.className = "burve-crop-thumb-preview-frame";
+    const previewSizer = document.createElement("div");
+    previewSizer.className = "burve-crop-thumb-preview-sizer";
+    const previewHost = document.createElement("div");
+    const showPreviewFallback = () => {
+      previewHost.className = "burve-crop-thumb-fallback";
+      previewHost.replaceChildren(document.createTextNode("Preview"));
+    };
+    previewFrame.appendChild(previewSizer);
+    previewFrame.appendChild(previewHost);
+    if (this.failedThumbnailUrls.has(viewUrl)) {
+      showPreviewFallback();
+    } else {
+      previewHost.className = "burve-crop-thumb-preview";
+      const previewImage = document.createElement("img");
+      previewImage.src = viewUrl;
+      previewImage.alt = filename || imageValue;
+      previewImage.decoding = "async";
+      previewImage.addEventListener("error", () => {
+        this.failedThumbnailUrls.add(viewUrl);
+        showPreviewFallback();
+      });
+      previewHost.appendChild(previewImage);
+    }
+    const overlayLabel = document.createElement("span");
+    overlayLabel.className = "burve-crop-thumb-label";
+    overlayLabel.textContent = filename || imageValue;
+    previewFrame.appendChild(overlayLabel);
+
+    card.appendChild(previewFrame);
+
+    return card;
   }
 
   setTool(tool) {
@@ -607,6 +1103,7 @@ class CropMaskEditor {
     }
     this.imageWidget.options = this.imageWidget.options || {};
     this.imageWidget.options.values = nextOptions.map((value) => String(value));
+    this.renderImagePicker();
   }
 
   setImageWidgetValue(nextValue, { forceRefresh = false } = {}) {
@@ -712,13 +1209,16 @@ class CropMaskEditor {
       }
 
       this.lastImageSyncAt = Date.now();
+      this.renderImagePicker();
       return nextOptions;
     } catch (error) {
       console.error("[Burve Crop + Mask Load] Failed to refresh input images.", error);
       if (showErrorStatus) {
         this.setStatusOverride("Image list refresh failed", 2200);
       }
-      return this.getImageOptions();
+      const currentOptions = this.getImageOptions();
+      this.renderImagePicker();
+      return currentOptions;
     } finally {
       this.syncInFlight = false;
     }
@@ -744,6 +1244,7 @@ class CropMaskEditor {
       }
 
       const uploadedValue = buildImageWidgetValue(payload);
+      this.failedThumbnailUrls.delete(buildViewUrl(uploadedValue));
       const nextOptions = await this.syncImageOptions({
         force: true,
         preferredValue: uploadedValue,
@@ -830,6 +1331,7 @@ class CropMaskEditor {
   refreshFromWidgets(force = false) {
     const imageValue = this.getImageValue();
     const ratioValue = this.getRatioValue();
+    this.renderImagePicker();
     if (!force && imageValue === this.lastWidgetImage && ratioValue === this.lastWidgetRatio) {
       return;
     }
@@ -899,8 +1401,9 @@ class CropMaskEditor {
     const paddingBottom = Number.parseFloat(rootStyles.paddingBottom || "0") || 0;
     const gap = Number.parseFloat(rootStyles.rowGap || rootStyles.gap || "10") || 10;
     const toolbarHeight = Math.ceil(this.toolbar?.offsetHeight || this.toolbar?.clientHeight || 0);
+    const pickerHeight = Math.ceil(this.pickerPanel?.offsetHeight || this.pickerPanel?.clientHeight || 0);
     const statusHeight = Math.ceil(this.statusBar?.offsetHeight || this.statusBar?.clientHeight || 0);
-    const chromeHeight = paddingTop + paddingBottom + toolbarHeight + statusHeight + gap * 2;
+    const chromeHeight = paddingTop + paddingBottom + toolbarHeight + pickerHeight + statusHeight + gap * 3;
     const hostHeight = Math.max(1, Math.floor(this.root.parentElement?.clientHeight || this.widgetHeight));
     const minimumWidgetHeight = Math.ceil(chromeHeight + CANVAS_MIN_HEIGHT);
 
@@ -947,6 +1450,7 @@ class CropMaskEditor {
       clientToLogicalScaleX: canvasMetrics.scaleX,
       clientToLogicalScaleY: canvasMetrics.scaleY,
       toolbarHeight,
+      pickerHeight,
       statusHeight,
       paddingTop,
       paddingBottom,
@@ -1597,6 +2101,23 @@ class CropMaskEditor {
 
 app.registerExtension({
   name: "Burve.CropMaskLoad",
+  settings: [
+    {
+      id: IMAGE_PICKER_MODE_SETTING_ID,
+      name: "Image Picker Mode",
+      category: ["Burve Tools", "Crop + Mask Load", "Image Picker Mode"],
+      type: "combo",
+      defaultValue: DEFAULT_IMAGE_PICKER_MODE,
+      options: [
+        { text: "List", value: "list" },
+        { text: "Grid", value: "grid" },
+      ],
+      tooltip: "Choose whether Burve Crop + Mask Load starts with a text list or thumbnail grid picker.",
+      onChange(newVal) {
+        dispatchPickerModeChange(newVal);
+      },
+    },
+  ],
   beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData?.name !== TARGET_NODE) {
       return;

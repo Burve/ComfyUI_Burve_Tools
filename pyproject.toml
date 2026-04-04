@@ -1,7 +1,7 @@
 [project]
 name = "burve_tools"
-description = "A ComfyUI node pack for Gemini image generation on AI Studio and Vertex AI, interactive crop-and-mask editing with input upload/refresh and aspect-ratio-safe apply workflows, character planning, prompt tools, and image utilities."
-version = "2.2.0"
+description = "A ComfyUI node pack for Gemini image generation on AI Studio and Vertex AI, interactive crop-and-mask editing with list/grid thumbnail image picking, in-editor upload/refresh, aspect-ratio-safe apply workflows, character planning, prompt tools, and image utilities."
+version = "2.3.0"
 license = {file = "LICENSE"} 
 # classifiers = [
 #     # For OS-independent nodes (works on all operating systems)

@@ -10,12 +10,12 @@ async def comfy_entrypoint():
     except ModuleNotFoundError as exc:
         if exc.name and exc.name.startswith("comfy_api"):
             raise RuntimeError(
-                "ComfyUI_Burve_Tools 2.2.0 requires a DynamicCombo-capable ComfyUI build "
+                "ComfyUI_Burve_Tools 2.3.0 requires a DynamicCombo-capable ComfyUI build "
                 "with comfy_api.latest available."
             ) from exc
         if exc.name and exc.name.startswith("google.genai"):
             raise RuntimeError(
-                "ComfyUI_Burve_Tools 2.2.0 requires google-genai>=1.68.0,<2."
+                "ComfyUI_Burve_Tools 2.3.0 requires google-genai>=1.68.0,<2."
             ) from exc
         raise
 
