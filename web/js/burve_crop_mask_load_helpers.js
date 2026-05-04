@@ -10,6 +10,25 @@ export function buildImageWidgetValue(uploadResult) {
   return subfolder ? `${subfolder}/${name}` : name;
 }
 
+export function computeCropMaskWidgetLayout({ widgetHeight, chromeHeight, minCanvasHeight }) {
+  const nextWidgetHeight = Math.max(widgetHeight, Math.ceil(chromeHeight + minCanvasHeight));
+  return {
+    widgetHeight: nextWidgetHeight,
+    canvasHeight: Math.max(1, Math.floor(nextWidgetHeight - chromeHeight)),
+  };
+}
+
+export function isClientPointInsideRect({ clientX, clientY, rect }) {
+  const left = Number(rect?.left);
+  const top = Number(rect?.top);
+  const width = Number(rect?.width);
+  const height = Number(rect?.height);
+  if (!Number.isFinite(left) || !Number.isFinite(top) || !(width > 0) || !(height > 0)) {
+    return false;
+  }
+  return clientX >= left && clientX <= left + width && clientY >= top && clientY <= top + height;
+}
+
 function normalizeImageOptionQuery(query) {
   return String(query || "").trim().toLowerCase();
 }

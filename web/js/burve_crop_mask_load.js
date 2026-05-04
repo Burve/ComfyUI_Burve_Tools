@@ -6,7 +6,9 @@ import {
 } from "./burve_crop_mask_geometry.js";
 import {
   buildImageWidgetValue,
+  computeCropMaskWidgetLayout,
   filterImageOptions,
+  isClientPointInsideRect,
   sameStringArray,
   selectSyncedImageValue,
 } from "./burve_crop_mask_load_helpers.js";
@@ -29,13 +31,47 @@ const PAINT_MAX_ALPHA = 0.34;
 const INPUT_FILES_ROUTE = "/internal/files/input";
 const IMAGE_UPLOAD_ROUTE = "/upload/image";
 const IMAGE_SYNC_THROTTLE_MS = 1500;
-const DEFAULT_HINT_TEXT = "Wheel: zoom | Space/middle drag: pan";
+const DEFAULT_HINT_TEXT = "Wheel over preview: zoom | Space/middle drag: pan";
 const IMAGE_PICKER_MODE_SETTING_ID = "Burve.CropMaskLoad.ImagePickerMode";
 const IMAGE_PICKER_MODE_EVENT = "burve-crop-mask-load:image-picker-mode";
 const DEFAULT_IMAGE_PICKER_MODE = "list";
 const IMAGE_PICKER_BODY_HEIGHT = 188;
 const IMAGE_PICKER_LIST_ROWS = 7;
+const NODE_MIN_WIDTH = 560;
+const NODE_WIDGET_VERTICAL_ALLOWANCE = 48;
+const DEFAULT_WIDGET_HEIGHT = CANVAS_MIN_HEIGHT + IMAGE_PICKER_BODY_HEIGHT + 160;
 let fallbackImagePickerMode = DEFAULT_IMAGE_PICKER_MODE;
+const activeCropMaskEditors = new Set();
+const GLOBAL_WHEEL_OPTIONS = { capture: true, passive: false };
+
+function consumeWheelEvent(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation?.();
+}
+
+function handleGlobalCropMaskWheel(event) {
+  const editors = [...activeCropMaskEditors];
+  for (let index = editors.length - 1; index >= 0; index -= 1) {
+    if (editors[index].handleGlobalWheelEvent(event)) {
+      return;
+    }
+  }
+}
+
+function registerActiveCropMaskEditor(editor) {
+  if (activeCropMaskEditors.size === 0) {
+    window.addEventListener("wheel", handleGlobalCropMaskWheel, GLOBAL_WHEEL_OPTIONS);
+  }
+  activeCropMaskEditors.add(editor);
+}
+
+function unregisterActiveCropMaskEditor(editor) {
+  activeCropMaskEditors.delete(editor);
+  if (activeCropMaskEditors.size === 0) {
+    window.removeEventListener("wheel", handleGlobalCropMaskWheel, GLOBAL_WHEEL_OPTIONS);
+  }
+}
 
 function sanitizePickerMode(value) {
   return value === "grid" ? "grid" : DEFAULT_IMAGE_PICKER_MODE;
@@ -111,6 +147,7 @@ function injectStyles() {
         0 18px 44px rgba(0, 0, 0, 0.22);
       color: #f4efe6;
       font-family: Georgia, "Times New Roman", serif;
+      pointer-events: auto;
     }
     .burve-crop-toolbar,
     .burve-crop-status {
@@ -404,6 +441,7 @@ function injectStyles() {
         linear-gradient(135deg, rgba(11, 14, 18, 0.95), rgba(24, 28, 35, 0.96));
       border: 1px solid rgba(255, 255, 255, 0.08);
       transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+      pointer-events: auto;
     }
     .burve-crop-root.drag-upload .burve-crop-canvas-wrap {
       border-color: rgba(158, 245, 255, 0.72);
@@ -418,6 +456,7 @@ function injectStyles() {
       display: block;
       touch-action: none;
       cursor: crosshair;
+      pointer-events: auto;
     }
     .burve-crop-status {
       justify-content: space-between;
@@ -675,6 +714,8 @@ class CropMaskEditor {
 
     this.canvasWrap = this.root.querySelector(".burve-crop-canvas-wrap");
     this.canvas = this.root.querySelector(".burve-crop-canvas");
+    this.canvasWrap.setAttribute("data-capture-wheel", "true");
+    this.canvas.setAttribute("data-capture-wheel", "true");
     this.ctx = this.canvas.getContext("2d");
     this.overlayCanvas = document.createElement("canvas");
     this.overlayCtx = this.overlayCanvas.getContext("2d");
@@ -698,7 +739,7 @@ class CropMaskEditor {
     this.uploadImageButton = this.root.querySelector('[data-role="upload-image"]');
     this.refreshImagesButton = this.root.querySelector('[data-role="refresh-images"]');
     this.tool = "crop";
-    this.widgetHeight = CANVAS_MIN_HEIGHT + IMAGE_PICKER_BODY_HEIGHT + 160;
+    this.widgetHeight = DEFAULT_WIDGET_HEIGHT;
     this.stageMetrics = {
       cssWidth: 320,
       cssHeight: CANVAS_MIN_HEIGHT,
@@ -770,7 +811,17 @@ class CropMaskEditor {
     this.canvas.addEventListener("pointerup", (event) => this.onPointerUp(event));
     this.canvas.addEventListener("pointercancel", (event) => this.onPointerUp(event));
     this.canvas.addEventListener("pointerleave", () => this.onPointerLeave());
-    this.canvas.addEventListener("wheel", (event) => this.onWheel(event), { passive: false });
+    this.canvasWrap.addEventListener("wheel", (event) => this.onWheel(event), { passive: false, capture: true });
+    this.root.addEventListener(
+      "wheel",
+      (event) => {
+        if (this.canvasWrap.contains(event.target) || this.pickerPanel.contains(event.target)) {
+          return;
+        }
+        consumeWheelEvent(event);
+      },
+      { passive: false }
+    );
     this.root.addEventListener("dragenter", this.onDragEnter);
     this.root.addEventListener("dragover", this.onDragOver);
     this.root.addEventListener("dragleave", this.onDragLeave);
@@ -783,6 +834,7 @@ class CropMaskEditor {
       hideOnZoom: false,
       getHeight: () => this.widgetHeight,
       getMinHeight: () => this.widgetHeight,
+      getMaxHeight: () => this.widgetHeight,
       getValue: () => "",
       setValue: () => {},
       afterResize: () => this.draw(),
@@ -796,6 +848,7 @@ class CropMaskEditor {
     this.refreshFromWidgets(true);
     void this.syncImageOptions({ force: true });
     this.updateNodeSize();
+    registerActiveCropMaskEditor(this);
   }
 
   onKeyDown = (event) => {
@@ -815,6 +868,45 @@ class CropMaskEditor {
   onExternalPickerModeChange = (event) => {
     this.setImagePickerMode(event?.detail, { persist: false });
   };
+
+  handleGlobalWheelEvent(event) {
+    if (this.destroyed || event.defaultPrevented) {
+      return false;
+    }
+    const target = event.target;
+    if (target instanceof Node && this.pickerPanel?.contains(target)) {
+      return false;
+    }
+    const point = { clientX: event.clientX, clientY: event.clientY };
+    if (
+      isClientPointInsideRect({
+        ...point,
+        rect: this.canvasWrap?.getBoundingClientRect?.(),
+      })
+    ) {
+      this.onWheel(event);
+      return true;
+    }
+    if (
+      isClientPointInsideRect({
+        ...point,
+        rect: this.pickerPanel?.getBoundingClientRect?.(),
+      })
+    ) {
+      consumeWheelEvent(event);
+      return true;
+    }
+    if (
+      isClientPointInsideRect({
+        ...point,
+        rect: this.root?.getBoundingClientRect?.(),
+      })
+    ) {
+      consumeWheelEvent(event);
+      return true;
+    }
+    return false;
+  }
 
   onDragEnter = (event) => {
     if (!this.isImageFileDrag(event)) {
@@ -861,7 +953,11 @@ class CropMaskEditor {
   };
 
   destroy() {
+    if (this.destroyed) {
+      return;
+    }
     this.destroyed = true;
+    unregisterActiveCropMaskEditor(this);
     window.clearTimeout(this.saveTimer);
     window.clearTimeout(this.statusTimer);
     this.root.removeEventListener("dragenter", this.onDragEnter);
@@ -874,10 +970,14 @@ class CropMaskEditor {
   }
 
   updateNodeSize() {
-    this.node.size = [
-      Math.max(this.node.size?.[0] ?? 0, 560),
-      Math.max(this.node.size?.[1] ?? 0, Math.ceil(this.widgetHeight + 48)),
-    ];
+    const currentWidth = Number(this.node.size?.[0]) || 0;
+    const currentHeight = Number(this.node.size?.[1]) || 0;
+    const nextWidth = Math.max(currentWidth, NODE_MIN_WIDTH);
+    const nextHeight = Math.ceil(this.widgetHeight + NODE_WIDGET_VERTICAL_ALLOWANCE);
+
+    if (currentWidth !== nextWidth || currentHeight !== nextHeight) {
+      this.node.size = [nextWidth, nextHeight];
+    }
   }
 
   hideStateWidget() {
@@ -1404,17 +1504,21 @@ class CropMaskEditor {
     const pickerHeight = Math.ceil(this.pickerPanel?.offsetHeight || this.pickerPanel?.clientHeight || 0);
     const statusHeight = Math.ceil(this.statusBar?.offsetHeight || this.statusBar?.clientHeight || 0);
     const chromeHeight = paddingTop + paddingBottom + toolbarHeight + pickerHeight + statusHeight + gap * 3;
-    const hostHeight = Math.max(1, Math.floor(this.root.parentElement?.clientHeight || this.widgetHeight));
-    const minimumWidgetHeight = Math.ceil(chromeHeight + CANVAS_MIN_HEIGHT);
+    const layout = computeCropMaskWidgetLayout({
+      widgetHeight: this.widgetHeight,
+      chromeHeight,
+      minCanvasHeight: CANVAS_MIN_HEIGHT,
+    });
 
-    if (this.widgetHeight < minimumWidgetHeight) {
-      this.widgetHeight = minimumWidgetHeight;
+    if (this.widgetHeight !== layout.widgetHeight) {
+      this.widgetHeight = layout.widgetHeight;
       this.updateNodeSize();
       app.graph?.setDirtyCanvas?.(true, true);
     }
 
+    const hostHeight = layout.widgetHeight;
+    const stageHeight = layout.canvasHeight;
     this.root.style.height = `${hostHeight}px`;
-    const stageHeight = Math.max(1, Math.floor(hostHeight - chromeHeight));
     this.canvasWrap.style.height = `${stageHeight}px`;
     this.canvasWrap.style.minHeight = `${stageHeight}px`;
 
@@ -1858,11 +1962,11 @@ class CropMaskEditor {
   }
 
   onWheel(event) {
+    consumeWheelEvent(event);
     if (!this.sourceImage) {
       return;
     }
     this.ensureState();
-    event.preventDefault();
     this.layoutStage();
     const pointer = this.getPointerPoint(event);
     const previousTransform = this.getViewTransform();
