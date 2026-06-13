@@ -5,10 +5,13 @@ import {
   getLogicalCanvasMetrics,
 } from "./burve_crop_mask_geometry.js";
 import {
+  buildBucketFillRuns,
   buildImageWidgetValue,
   computeCropMaskWidgetLayout,
   filterImageOptions,
   isClientPointInsideRect,
+  maskAlphaToGrayscale,
+  renderSourceMask,
   sameStringArray,
   selectSyncedImageValue,
 } from "./burve_crop_mask_load_helpers.js";
@@ -181,6 +184,18 @@ function injectStyles() {
       background: rgba(220, 191, 122, 0.18);
       border-color: rgba(220, 191, 122, 0.65);
       box-shadow: 0 0 0 1px rgba(220, 191, 122, 0.2) inset;
+    }
+    .burve-crop-toolbar button[data-role="mask-inspection"].active {
+      background: #f4efe6;
+      border-color: #ffffff;
+      color: #111317;
+      box-shadow:
+        0 0 0 1px rgba(255, 255, 255, 0.36) inset,
+        0 0 16px rgba(255, 255, 255, 0.12);
+    }
+    .burve-crop-toolbar button:disabled {
+      cursor: not-allowed;
+      opacity: 0.42;
     }
     .burve-crop-toolbar label {
       display: inline-flex;
@@ -665,6 +680,7 @@ class CropMaskEditor {
     this.statusOverride = "";
     this.imageFilterQuery = "";
     this.imagePickerMode = readPickerModeSetting();
+    this.maskInspectionEnabled = false;
     this.failedThumbnailUrls = new Set();
     this.destroyed = false;
     injectStyles();
@@ -676,11 +692,15 @@ class CropMaskEditor {
         <button data-tool="crop" class="active">Crop</button>
         <button data-tool="paint">Paint</button>
         <button data-tool="erase">Erase</button>
+        <button data-tool="bucket" title="Fill the connected unmasked area under the cursor">Bucket</button>
         <label>Brush Size <input data-role="brush-size" type="range" min="4" max="256" step="1" value="${DEFAULT_BRUSH_RADIUS}" /><span class="burve-crop-value" data-role="brush-value">${DEFAULT_BRUSH_RADIUS}px</span></label>
         <label>Softness <input data-role="softness" type="range" min="0" max="1" step="0.01" value="${DEFAULT_BRUSH_SOFTNESS}" /></label>
         <button data-action="fit">Fit</button>
         <button data-action="reset-crop">Reset Crop</button>
         <button data-action="clear-mask">Clear Mask</button>
+        <button data-action="fill-mask" title="Mask the entire current crop">Fill Mask</button>
+        <button data-action="undo-mask" data-role="undo-mask" disabled>Undo Last</button>
+        <button type="button" data-role="mask-inspection" aria-pressed="false" title="Show mask strength as grayscale: black is unmasked, white is fully masked">Mask Check</button>
       </div>
       <div class="burve-crop-picker">
         <div class="burve-crop-picker-bar">
@@ -727,6 +747,8 @@ class CropMaskEditor {
     this.brushSizeInput = this.root.querySelector('[data-role="brush-size"]');
     this.brushValue = this.root.querySelector('[data-role="brush-value"]');
     this.softnessInput = this.root.querySelector('[data-role="softness"]');
+    this.undoMaskButton = this.root.querySelector('[data-role="undo-mask"]');
+    this.maskInspectionButton = this.root.querySelector('[data-role="mask-inspection"]');
     this.toolButtons = [...this.root.querySelectorAll("[data-tool]")];
     this.actionButtons = [...this.root.querySelectorAll("[data-action]")];
     this.pickerModeButtons = [...this.root.querySelectorAll("[data-picker-mode]")];
@@ -761,6 +783,7 @@ class CropMaskEditor {
     this.actionButtons.forEach((button) => {
       button.addEventListener("click", () => this.handleAction(button.dataset.action));
     });
+    this.maskInspectionButton.addEventListener("click", () => this.toggleMaskInspection());
     this.pickerModeButtons.forEach((button) => {
       button.addEventListener("click", () => this.setImagePickerMode(button.dataset.pickerMode));
     });
@@ -1016,6 +1039,13 @@ class CropMaskEditor {
     }
   }
 
+  toggleMaskInspection() {
+    this.maskInspectionEnabled = !this.maskInspectionEnabled;
+    this.maskInspectionButton.classList.toggle("active", this.maskInspectionEnabled);
+    this.maskInspectionButton.setAttribute("aria-pressed", this.maskInspectionEnabled ? "true" : "false");
+    this.draw();
+  }
+
   setImagePickerMode(mode, { persist = true } = {}) {
     const nextMode = sanitizePickerMode(mode);
     this.imagePickerMode = nextMode;
@@ -1157,8 +1187,8 @@ class CropMaskEditor {
   setTool(tool) {
     this.tool = tool;
     this.ensureState();
-    if (this.state && tool !== "crop") {
-      this.state.brush.mode = tool === "erase" ? "erase" : "paint";
+    if (this.state && ["paint", "erase"].includes(tool)) {
+      this.state.brush.mode = tool;
     }
     this.toolButtons.forEach((button) => {
       button.classList.toggle("active", button.dataset.tool === tool);
@@ -1179,9 +1209,65 @@ class CropMaskEditor {
       this.state.crop = buildDefaultCrop(this.sourceImage.width, this.sourceImage.height, this.getRatioValue());
     } else if (action === "clear-mask") {
       this.state.strokes = [];
+    } else if (action === "fill-mask") {
+      this.state.strokes.push({
+        mode: "fill",
+        radius_px: 1,
+        softness: 0,
+        opacity: 1,
+        points: [[this.state.crop.x, this.state.crop.y]],
+      });
+    } else if (action === "undo-mask") {
+      if (!this.state.strokes.length) {
+        return;
+      }
+      this.state.strokes.pop();
     }
     this.scheduleSave();
     this.draw();
+  }
+
+  updateMaskActionButtons() {
+    if (this.undoMaskButton) {
+      this.undoMaskButton.disabled = !this.state?.strokes?.length;
+    }
+  }
+
+  fillBucketAt(imagePoint) {
+    const sourceMask = renderSourceMask({
+      imageWidth: this.sourceImage.width,
+      imageHeight: this.sourceImage.height,
+      crop: this.state.crop,
+      operations: this.state.strokes,
+    });
+    const seed = [Math.floor(imagePoint.x), Math.floor(imagePoint.y)];
+    const result = buildBucketFillRuns({
+      mask: sourceMask,
+      imageWidth: this.sourceImage.width,
+      imageHeight: this.sourceImage.height,
+      crop: this.state.crop,
+      seedX: seed[0],
+      seedY: seed[1],
+    });
+    if (!result.runs.length) {
+      this.setStatusOverride(
+        result.reason === "masked" ? "Bucket target is already masked" : "Bucket target is outside the crop",
+        1800
+      );
+      return;
+    }
+
+    this.state.strokes.push({
+      mode: "bucket",
+      radius_px: 1,
+      softness: 0,
+      opacity: 1,
+      points: [seed],
+      seed,
+      runs: result.runs,
+    });
+    this.scheduleSave();
+    this.setStatusOverride(`Bucket filled ${result.pixelCount.toLocaleString()} px`, 1600);
   }
 
   getRatioValue() {
@@ -1711,6 +1797,10 @@ class CropMaskEditor {
       this.canvas.style.cursor = "grabbing";
       return;
     }
+    if (this.tool === "bucket") {
+      this.canvas.style.cursor = "cell";
+      return;
+    }
     if (this.tool === "crop") {
       if (this.hoverHandle) {
         this.canvas.style.cursor = cursorForHandle(this.hoverHandle);
@@ -1786,6 +1876,13 @@ class CropMaskEditor {
     }
 
     if (!imagePoint || !this.isPointInsideCrop(imagePoint)) {
+      return;
+    }
+
+    if (this.tool === "bucket") {
+      if (event.button === 0) {
+        this.fillBucketAt(imagePoint);
+      }
       return;
     }
 
@@ -2009,6 +2106,43 @@ class CropMaskEditor {
         return;
       }
 
+      if (stroke.mode === "fill") {
+        for (let y = cropClip.top; y < cropClip.bottom; y += 1) {
+          alphaBuffer.fill(1, y * width + cropClip.left, y * width + cropClip.right);
+        }
+        return;
+      }
+      if (stroke.mode === "bucket") {
+        for (const run of Array.isArray(stroke.runs) ? stroke.runs : []) {
+          if (!Array.isArray(run) || run.length !== 3) {
+            continue;
+          }
+          const sourceY = Math.round(Number(run[0]));
+          const sourceLeft = Math.round(Number(run[1]));
+          const sourceRight = Math.round(Number(run[2]));
+          const runLeft = Math.max(
+            cropClip.left,
+            Math.floor((transform.left + sourceLeft * transform.scale) * dpr)
+          );
+          const runRight = Math.min(
+            cropClip.right,
+            Math.ceil((transform.left + sourceRight * transform.scale) * dpr)
+          );
+          const runTop = Math.max(
+            cropClip.top,
+            Math.floor((transform.top + sourceY * transform.scale) * dpr)
+          );
+          const runBottom = Math.min(
+            cropClip.bottom,
+            Math.ceil((transform.top + (sourceY + 1) * transform.scale) * dpr)
+          );
+          for (let y = runTop; y < runBottom; y += 1) {
+            alphaBuffer.fill(1, y * width + runLeft, y * width + runRight);
+          }
+        }
+        return;
+      }
+
       const radius = Math.max(0.75, Number(stroke.radius_px || DEFAULT_BRUSH_RADIUS) * transform.scale * dpr);
       const softness = clamp(Number(stroke.softness ?? DEFAULT_BRUSH_SOFTNESS), 0, 1);
       const opacity = clamp(Number(stroke.opacity ?? DEFAULT_BRUSH_OPACITY), 0, 1);
@@ -2059,10 +2193,18 @@ class CropMaskEditor {
     const data = imageData.data;
     for (let index = 0; index < alphaBuffer.length; index += 1) {
       const alpha = clamp(alphaBuffer[index], 0, 1);
+      const offset = index * 4;
+      if (this.maskInspectionEnabled) {
+        const value = maskAlphaToGrayscale(alpha);
+        data[offset] = value;
+        data[offset + 1] = value;
+        data[offset + 2] = value;
+        data[offset + 3] = 255;
+        continue;
+      }
       if (alpha <= 0) {
         continue;
       }
-      const offset = index * 4;
       data[offset] = PAINT_RGBA[0];
       data[offset + 1] = PAINT_RGBA[1];
       data[offset + 2] = PAINT_RGBA[2];
@@ -2083,27 +2225,31 @@ class CropMaskEditor {
     };
 
     this.ctx.save();
-    this.ctx.fillStyle = "rgba(0, 0, 0, 0.52)";
-    this.ctx.beginPath();
-    this.ctx.rect(transform.left, transform.top, this.sourceImage.width * transform.scale, this.sourceImage.height * transform.scale);
-    this.ctx.rect(cropRect.left, cropRect.top, cropRect.width, cropRect.height);
-    this.ctx.fill("evenodd");
+    if (!this.maskInspectionEnabled) {
+      this.ctx.fillStyle = "rgba(0, 0, 0, 0.52)";
+      this.ctx.beginPath();
+      this.ctx.rect(transform.left, transform.top, this.sourceImage.width * transform.scale, this.sourceImage.height * transform.scale);
+      this.ctx.rect(cropRect.left, cropRect.top, cropRect.width, cropRect.height);
+      this.ctx.fill("evenodd");
+    }
 
     this.ctx.strokeStyle = CROP_STROKE;
     this.ctx.lineWidth = 2;
     this.ctx.strokeRect(cropRect.left, cropRect.top, cropRect.width, cropRect.height);
 
-    this.ctx.strokeStyle = CROP_GRID;
-    this.ctx.beginPath();
-    this.ctx.moveTo(cropRect.left + cropRect.width / 3, cropRect.top);
-    this.ctx.lineTo(cropRect.left + cropRect.width / 3, cropRect.top + cropRect.height);
-    this.ctx.moveTo(cropRect.left + (cropRect.width * 2) / 3, cropRect.top);
-    this.ctx.lineTo(cropRect.left + (cropRect.width * 2) / 3, cropRect.top + cropRect.height);
-    this.ctx.moveTo(cropRect.left, cropRect.top + cropRect.height / 3);
-    this.ctx.lineTo(cropRect.left + cropRect.width, cropRect.top + cropRect.height / 3);
-    this.ctx.moveTo(cropRect.left, cropRect.top + (cropRect.height * 2) / 3);
-    this.ctx.lineTo(cropRect.left + cropRect.width, cropRect.top + (cropRect.height * 2) / 3);
-    this.ctx.stroke();
+    if (!this.maskInspectionEnabled) {
+      this.ctx.strokeStyle = CROP_GRID;
+      this.ctx.beginPath();
+      this.ctx.moveTo(cropRect.left + cropRect.width / 3, cropRect.top);
+      this.ctx.lineTo(cropRect.left + cropRect.width / 3, cropRect.top + cropRect.height);
+      this.ctx.moveTo(cropRect.left + (cropRect.width * 2) / 3, cropRect.top);
+      this.ctx.lineTo(cropRect.left + (cropRect.width * 2) / 3, cropRect.top + cropRect.height);
+      this.ctx.moveTo(cropRect.left, cropRect.top + cropRect.height / 3);
+      this.ctx.lineTo(cropRect.left + cropRect.width, cropRect.top + cropRect.height / 3);
+      this.ctx.moveTo(cropRect.left, cropRect.top + (cropRect.height * 2) / 3);
+      this.ctx.lineTo(cropRect.left + cropRect.width, cropRect.top + (cropRect.height * 2) / 3);
+      this.ctx.stroke();
+    }
 
     const handles = createHandleMap(cropRect);
     Object.entries(handles).forEach(([handle, point]) => {
@@ -2170,6 +2316,7 @@ class CropMaskEditor {
     this.ctx.clearRect(0, 0, this.stageMetrics.cssWidth, this.stageMetrics.cssHeight);
 
     if (!this.sourceImage) {
+      this.updateMaskActionButtons();
       this.cropInfo.textContent = this.statusOverride || "No image selected";
       this.ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
       this.ctx.font = "16px Georgia";
@@ -2178,28 +2325,32 @@ class CropMaskEditor {
     }
 
     this.ensureState();
+    this.updateMaskActionButtons();
     const transform = this.getViewTransform();
     this.ctx.imageSmoothingEnabled = true;
     this.ctx.save();
     this.ctx.beginPath();
     this.ctx.rect(0, 0, this.stageMetrics.cssWidth, this.stageMetrics.cssHeight);
     this.ctx.clip();
-    this.ctx.drawImage(
-      this.sourceImage,
-      transform.left,
-      transform.top,
-      this.sourceImage.width * transform.scale,
-      this.sourceImage.height * transform.scale
-    );
+    if (!this.maskInspectionEnabled) {
+      this.ctx.drawImage(
+        this.sourceImage,
+        transform.left,
+        transform.top,
+        this.sourceImage.width * transform.scale,
+        this.sourceImage.height * transform.scale
+      );
+    }
     this.renderMaskOverlay(transform);
     this.drawCropOverlay(transform);
     this.drawBrushPreview(transform);
     this.ctx.restore();
 
     const crop = this.state.crop;
+    const viewMode = this.maskInspectionEnabled ? "mask check" : "image";
     this.cropInfo.textContent =
       this.statusOverride ||
-      `${crop.width}x${crop.height} px | ${this.getRatioValue()} | ${this.tool} | brush ${Number(this.brushSizeInput.value)} px | ${this.state.strokes.length} stroke(s)`;
+      `${crop.width}x${crop.height} px | ${this.getRatioValue()} | ${viewMode} | ${this.tool} | brush ${Number(this.brushSizeInput.value)} px | ${this.state.strokes.length} stroke(s)`;
   }
 }
 

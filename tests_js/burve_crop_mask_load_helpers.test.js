@@ -196,3 +196,195 @@ test("selectSyncedImageValue retains the current selection after filtering and s
     "nested/keep.png"
   );
 });
+
+test("mask inspection grayscale preserves mask opacity levels", async () => {
+  const { maskAlphaToGrayscale } = await loadHelperModule();
+
+  assert.deepEqual(
+    [0, 0.25, 0.5, 0.75, 1].map(maskAlphaToGrayscale),
+    [0, 64, 128, 191, 255]
+  );
+});
+
+test("bucket fill stays inside a closed mask outline", async () => {
+  const { buildBucketFillRuns } = await loadHelperModule();
+  const width = 7;
+  const height = 7;
+  const mask = new Float32Array(width * height);
+  for (let x = 1; x <= 5; x += 1) {
+    mask[1 * width + x] = 1;
+    mask[5 * width + x] = 1;
+  }
+  for (let y = 1; y <= 5; y += 1) {
+    mask[y * width + 1] = 1;
+    mask[y * width + 5] = 1;
+  }
+  mask[2 * width + 2] = 0.25;
+  mask[3 * width + 2] = 0.75;
+  mask[4 * width + 4] = 0.999;
+
+  const result = buildBucketFillRuns({
+    mask,
+    imageWidth: width,
+    imageHeight: height,
+    crop: { x: 0, y: 0, width, height },
+    seedX: 3,
+    seedY: 3,
+  });
+
+  assert.equal(result.reason, null);
+  assert.equal(result.pixelCount, 9);
+  assert.deepEqual(result.runs, [
+    [2, 2, 5],
+    [3, 2, 5],
+    [4, 2, 5],
+  ]);
+  assert.equal(mask[2 * width + 2], 1);
+  assert.equal(mask[3 * width + 2], 1);
+  assert.equal(mask[4 * width + 4], 1);
+});
+
+test("bucket fill leaks through an open outline", async () => {
+  const { buildBucketFillRuns } = await loadHelperModule();
+  const width = 7;
+  const height = 7;
+  const mask = new Float32Array(width * height);
+  for (let x = 1; x <= 5; x += 1) {
+    if (x !== 3) {
+      mask[1 * width + x] = 1;
+    }
+    mask[5 * width + x] = 1;
+  }
+  for (let y = 1; y <= 5; y += 1) {
+    mask[y * width + 1] = 1;
+    mask[y * width + 5] = 1;
+  }
+
+  const result = buildBucketFillRuns({
+    mask,
+    imageWidth: width,
+    imageHeight: height,
+    crop: { x: 0, y: 0, width, height },
+    seedX: 3,
+    seedY: 3,
+  });
+
+  assert.equal(result.pixelCount, 34);
+  assert.ok(result.runs.some(([y]) => y === 0));
+  assert.ok(result.runs.some(([y, left, right]) => y === 3 && left === 2 && right === 5));
+});
+
+test("bucket fill is clipped to the crop boundary", async () => {
+  const { buildBucketFillRuns } = await loadHelperModule();
+  const result = buildBucketFillRuns({
+    mask: new Float32Array(25),
+    imageWidth: 5,
+    imageHeight: 5,
+    crop: { x: 1, y: 1, width: 3, height: 3 },
+    seedX: 2,
+    seedY: 2,
+  });
+
+  assert.equal(result.pixelCount, 9);
+  assert.deepEqual(result.runs, [
+    [1, 1, 4],
+    [2, 1, 4],
+    [3, 1, 4],
+  ]);
+});
+
+test("four-connected bucket fill does not cross a diagonal wall", async () => {
+  const { buildBucketFillRuns } = await loadHelperModule();
+  const width = 5;
+  const height = 5;
+  const mask = new Float32Array(width * height);
+  for (let index = 0; index < 5; index += 1) {
+    mask[index * width + index] = 1;
+  }
+
+  const result = buildBucketFillRuns({
+    mask,
+    imageWidth: width,
+    imageHeight: height,
+    crop: { x: 0, y: 0, width, height },
+    seedX: 4,
+    seedY: 0,
+  });
+
+  assert.equal(result.pixelCount, 10);
+  assert.ok(result.runs.every(([y, left]) => left > y));
+});
+
+test("bucket fill traverses a partially masked seed and upgrades feather pixels", async () => {
+  const { buildBucketFillRuns } = await loadHelperModule();
+  const mask = new Float32Array([1, 0.25, 0.5, 0.999, 1]);
+
+  const result = buildBucketFillRuns({
+    mask,
+    imageWidth: 5,
+    imageHeight: 1,
+    crop: { x: 0, y: 0, width: 5, height: 1 },
+    seedX: 2,
+    seedY: 0,
+  });
+
+  assert.deepEqual(result, { runs: [[0, 1, 4]], pixelCount: 3, reason: null });
+  assert.deepEqual(Array.from(mask), [1, 1, 1, 1, 1]);
+});
+
+test("bucket fill treats effectively full alpha as a solid boundary", async () => {
+  const { buildBucketFillRuns, BUCKET_BOUNDARY_ALPHA } = await loadHelperModule();
+  const mask = new Float32Array(3);
+  mask[1] = 0.999999;
+
+  const result = buildBucketFillRuns({
+    mask,
+    imageWidth: 3,
+    imageHeight: 1,
+    crop: { x: 0, y: 0, width: 3, height: 1 },
+    seedX: 1,
+    seedY: 0,
+  });
+
+  assert.equal(mask[1], BUCKET_BOUNDARY_ALPHA);
+  assert.deepEqual(result, { runs: [], pixelCount: 0, reason: "masked" });
+});
+
+test("source mask replay clips bucket runs and applies later erase operations", async () => {
+  const { renderSourceMask } = await loadHelperModule();
+  const mask = renderSourceMask({
+    imageWidth: 6,
+    imageHeight: 5,
+    crop: { x: 1, y: 1, width: 4, height: 3 },
+    operations: [
+      {
+        mode: "bucket",
+        points: [[2, 2]],
+        seed: [2, 2],
+        runs: [
+          [0, 0, 6],
+          [1, 0, 6],
+          [2, 0, 6],
+          [3, 0, 6],
+          [4, 0, 6],
+        ],
+      },
+      {
+        mode: "erase",
+        radius_px: 1,
+        softness: 0,
+        opacity: 1,
+        points: [[3, 2]],
+      },
+    ],
+  });
+
+  assert.equal(mask[0 * 6 + 2], 0);
+  assert.equal(mask[1 * 6 + 1], 1);
+  assert.equal(mask[2 * 6 + 1], 1);
+  assert.equal(mask[2 * 6 + 2], 0);
+  assert.equal(mask[2 * 6 + 3], 0);
+  assert.equal(mask[2 * 6 + 4], 0);
+  assert.equal(mask[3 * 6 + 4], 1);
+  assert.equal(mask[4 * 6 + 2], 0);
+});

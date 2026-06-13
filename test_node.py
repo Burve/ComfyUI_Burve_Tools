@@ -2405,6 +2405,133 @@ class BurveCropMaskLoadTests(unittest.TestCase):
         self.assertEqual(float(image_mask[0, 0, 0].item()), 0.0)
         self.assertGreater(float(image_mask[0, 2, 2].item()), 0.0)
 
+    def test_fill_mask_covers_crop_and_allows_later_erase(self):
+        node = BurveCropMaskLoad()
+        state = json.dumps(
+            {
+                "version": 1,
+                "image_name": "sample.png",
+                "source_size": {"width": 8, "height": 6},
+                "aspect_ratio": "1:1",
+                "crop": {"x": 1, "y": 0, "width": 6, "height": 6},
+                "viewport": {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0},
+                "brush": {"radius_px": 2, "softness": 0, "opacity": 1.0, "mode": "erase"},
+                "strokes": [
+                    {
+                        "mode": "fill",
+                        "radius_px": 1,
+                        "softness": 0,
+                        "opacity": 1.0,
+                        "points": [[1, 0]],
+                    },
+                    {
+                        "mode": "erase",
+                        "radius_px": 1,
+                        "softness": 0,
+                        "opacity": 1.0,
+                        "points": [[3, 3]],
+                    },
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_test_image(temp_dir)
+            with self._patch_input_dir(temp_dir):
+                _, _, image_mask, _, _ = node.load(
+                    image="sample.png",
+                    aspect_ratio="1:1",
+                    editor_state_json=state,
+                )
+
+        self.assertEqual(float(image_mask[0, 0, 0].item()), 0.0)
+        self.assertEqual(float(image_mask[0, 0, 1].item()), 1.0)
+        self.assertEqual(float(image_mask[0, 3, 3].item()), 0.0)
+        self.assertEqual(float(image_mask[0, 5, 6].item()), 1.0)
+        self.assertEqual(float(image_mask[0, 5, 7].item()), 0.0)
+
+    def test_bucket_runs_survive_normalization_and_replay_with_later_erase(self):
+        node = BurveCropMaskLoad()
+        bucket = {
+            "mode": "bucket",
+            "radius_px": 1,
+            "softness": 0,
+            "opacity": 1,
+            "points": [[3, 2]],
+            "seed": [3, 2],
+            "runs": [[y, 0, 8] for y in range(6)],
+        }
+        normalized, = BurveCropMaskLoad._normalize_strokes([bucket])
+        self.assertEqual(normalized["seed"], [3.0, 2.0])
+        self.assertEqual(normalized["runs"], bucket["runs"])
+
+        state = json.dumps(
+            {
+                "version": 1,
+                "image_name": "sample.png",
+                "source_size": {"width": 8, "height": 6},
+                "aspect_ratio": "1:1",
+                "crop": {"x": 1, "y": 0, "width": 6, "height": 6},
+                "viewport": {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0},
+                "brush": {"radius_px": 1, "softness": 0, "opacity": 1.0, "mode": "erase"},
+                "strokes": [
+                    bucket,
+                    {
+                        "mode": "erase",
+                        "radius_px": 1,
+                        "softness": 0,
+                        "opacity": 1.0,
+                        "points": [[3, 2]],
+                    },
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self._write_test_image(temp_dir)
+            with self._patch_input_dir(temp_dir):
+                _, _, image_mask, _, _ = node.load(
+                    image="sample.png",
+                    aspect_ratio="1:1",
+                    editor_state_json=state,
+                )
+
+        self.assertEqual(float(image_mask[0, 0, 0].item()), 0.0)
+        self.assertEqual(float(image_mask[0, 0, 1].item()), 1.0)
+        self.assertEqual(float(image_mask[0, 2, 2].item()), 0.0)
+        self.assertEqual(float(image_mask[0, 2, 3].item()), 0.0)
+        self.assertEqual(float(image_mask[0, 2, 4].item()), 0.0)
+        self.assertEqual(float(image_mask[0, 5, 6].item()), 1.0)
+        self.assertEqual(float(image_mask[0, 5, 7].item()), 0.0)
+
+    def test_bucket_runs_are_clipped_when_crop_changes(self):
+        strokes = BurveCropMaskLoad._normalize_strokes(
+            [
+                {
+                    "mode": "bucket",
+                    "radius_px": 1,
+                    "softness": 0,
+                    "opacity": 1,
+                    "points": [[0, 0]],
+                    "seed": [0, 0],
+                    "runs": [[0, 0, 8], [1, 0, 8], [2, 0, 8], [3, 0, 8]],
+                }
+            ]
+        )
+        mask = BurveCropMaskLoad._render_mask_strokes(
+            image_width=8,
+            image_height=6,
+            crop={"x": 2, "y": 1, "width": 3, "height": 3},
+            strokes=strokes,
+        )
+
+        self.assertEqual(float(mask.sum()), 9.0)
+        self.assertEqual(float(mask[0, 2]), 0.0)
+        self.assertEqual(float(mask[1, 1]), 0.0)
+        self.assertEqual(float(mask[1, 2]), 1.0)
+        self.assertEqual(float(mask[3, 4]), 1.0)
+        self.assertEqual(float(mask[3, 5]), 0.0)
+
     def test_is_changed_tracks_image_bytes_and_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = self._write_test_image(temp_dir)
@@ -2771,6 +2898,40 @@ class NodeRegistrationTests(unittest.TestCase):
 
     def test_crop_mask_frontend_extension_exists(self):
         self.assertTrue(os.path.exists(os.path.join(REPO_DIR, "web", "js", "burve_crop_mask_load.js")))
+
+    def test_crop_mask_frontend_mask_inspection_is_visual_only(self):
+        frontend_path = os.path.join(REPO_DIR, "web", "js", "burve_crop_mask_load.js")
+        with open(frontend_path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn('data-role="mask-inspection"', source)
+        handler_start = source.index("  toggleMaskInspection() {")
+        handler_end = source.index("\n  setImagePickerMode", handler_start)
+        handler = source[handler_start:handler_end]
+        self.assertIn("this.maskInspectionEnabled", handler)
+        self.assertNotIn("this.state", handler)
+        self.assertNotIn("scheduleSave", handler)
+        self.assertIn("maskAlphaToGrayscale(alpha)", source)
+        self.assertIn("Show mask strength as grayscale", source)
+
+    def test_crop_mask_frontend_exposes_fill_mask_action(self):
+        frontend_path = os.path.join(REPO_DIR, "web", "js", "burve_crop_mask_load.js")
+        with open(frontend_path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn('data-action="fill-mask"', source)
+        self.assertIn('mode: "fill"', source)
+
+    def test_crop_mask_frontend_exposes_bucket_and_undo_controls(self):
+        frontend_path = os.path.join(REPO_DIR, "web", "js", "burve_crop_mask_load.js")
+        with open(frontend_path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn('data-tool="bucket"', source)
+        self.assertIn('data-action="undo-mask"', source)
+        self.assertIn('mode: "bucket"', source)
+        self.assertIn("this.state.strokes.pop()", source)
+        self.assertIn("this.undoMaskButton.disabled = !this.state?.strokes?.length", source)
 
 
 if __name__ == "__main__":

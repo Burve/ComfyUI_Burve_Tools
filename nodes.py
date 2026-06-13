@@ -2105,7 +2105,7 @@ class BurveCropMaskLoad:
     def _normalize_brush(cls, brush):
         brush = brush or {}
         mode = str(brush.get("mode", "paint")).lower()
-        if mode not in {"paint", "erase"}:
+        if mode not in {"paint", "erase", "fill", "bucket"}:
             mode = "paint"
         return {
             "radius_px": max(1.0, cls._coerce_float(brush.get("radius_px"), cls.DEFAULT_BRUSH_RADIUS_PX)),
@@ -2138,15 +2138,37 @@ class BurveCropMaskLoad:
             if not isinstance(stroke, dict):
                 raise ValueError("each stroke must be an object.")
             brush = cls._normalize_brush(stroke)
-            normalized.append(
-                {
-                    "mode": brush["mode"],
-                    "radius_px": brush["radius_px"],
-                    "softness": brush["softness"],
-                    "opacity": brush["opacity"],
-                    "points": cls._normalize_points(stroke.get("points", [])),
-                }
-            )
+            points = cls._normalize_points(stroke.get("points", []))
+            normalized_stroke = {
+                "mode": brush["mode"],
+                "radius_px": brush["radius_px"],
+                "softness": brush["softness"],
+                "opacity": brush["opacity"],
+                "points": points,
+            }
+            if brush["mode"] == "bucket":
+                seed = stroke.get("seed", points[0])
+                if not isinstance(seed, (list, tuple)) or len(seed) != 2:
+                    raise ValueError("bucket seed must be a [x, y] pair.")
+                runs = stroke.get("runs", [])
+                if not isinstance(runs, list):
+                    raise ValueError("bucket runs must be a list.")
+                normalized_runs = []
+                for run in runs:
+                    if not isinstance(run, (list, tuple)) or len(run) != 3:
+                        raise ValueError("each bucket run must be a [y, x_start, x_end] triple.")
+                    y = int(round(cls._coerce_float(run[0], 0)))
+                    x_start = int(round(cls._coerce_float(run[1], 0)))
+                    x_end = int(round(cls._coerce_float(run[2], 0)))
+                    if x_end <= x_start:
+                        raise ValueError("bucket run end must be greater than its start.")
+                    normalized_runs.append([y, x_start, x_end])
+                normalized_stroke["seed"] = [
+                    cls._coerce_float(seed[0], points[0][0]),
+                    cls._coerce_float(seed[1], points[0][1]),
+                ]
+                normalized_stroke["runs"] = normalized_runs
+            normalized.append(normalized_stroke)
         return normalized
 
     @classmethod
@@ -2242,6 +2264,19 @@ class BurveCropMaskLoad:
             softness = min(max(float(stroke["softness"]), 0.0), 1.0)
             opacity = min(max(float(stroke["opacity"]), 0.0), 1.0)
             mode = stroke["mode"]
+
+            if mode == "fill":
+                mask[crop_top:crop_bottom, crop_left:crop_right] = 1.0
+                continue
+            if mode == "bucket":
+                for y, x_start, x_end in stroke.get("runs", []):
+                    if y < crop_top or y >= crop_bottom or y < 0 or y >= image_height:
+                        continue
+                    left = max(int(x_start), crop_left, 0)
+                    right = min(int(x_end), crop_right, image_width)
+                    if right > left:
+                        mask[y, left:right] = 1.0
+                continue
 
             if len(points) == 1:
                 cls._apply_brush_dab(
