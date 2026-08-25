@@ -227,7 +227,7 @@ A helper node to verify your Vertex AI environment configuration.
 ### 12. Burve System Instructions
 Selects pre-defined system instructions from a dropdown menu.
 
-*   **Functionality**: Loads system instructions from a JSON file (which auto-updates from GitHub) and outputs the selected instruction text.
+*   **Functionality**: Loads system instructions bundled with the installed package and outputs the selected instruction text. Instruction updates arrive with package releases.
 *   **Inputs**:
     *   `instruction_name`: Select a system instruction preset.
 *   **Outputs**:
@@ -245,7 +245,7 @@ Defines variables for use in dynamic prompts.
 ### 14. Burve Prompt Database
 Loads prompts from a database and injects variables.
 
-*   **Functionality**: Selects a prompt from a JSON database (auto-updating) and replaces placeholders (e.g., `[[name:default]]`) with values from the **Burve Variable Injector**.
+*   **Functionality**: Selects a prompt from the JSON database bundled with the installed package and replaces placeholders (e.g., `[[name:default]]`) with values from the **Burve Variable Injector**. Prompt updates arrive with package releases.
 *   **Inputs**:
     *   `prompt_name`: Select a prompt from the database.
     *   `variables` (Optional): A dictionary of variables from the **Burve Variable Injector** node.
@@ -262,7 +262,7 @@ Selects one prompt from a fixed bank of fourteen.
 *   **Inputs**:
     *   `prompt_1` through `prompt_14`: Multiline prompt strings.
     *   `index`: Selected prompt number from `1` through `14`.
-    *   `error_on_empty`: When enabled, selecting an empty prompt raises an error and performs a best-effort cancellation of remaining queued work.
+    *   `error_on_empty`: When enabled, selecting an empty prompt raises an error for the current workflow without affecting unrelated queued work.
 *   **Outputs**:
     *   `selected_prompt`: The chosen prompt text.
     *   `selected_index`: The validated selected index.

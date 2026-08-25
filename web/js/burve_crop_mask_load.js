@@ -14,6 +14,7 @@ import {
   hideCropMaskNativeWidgets,
   isClientPointInsideRect,
   maskAlphaToGrayscale,
+  migrateCropMaskSerializedNode,
   nextDomWidgetRecoveryState,
   removeNativeImagePreviewGuard,
   replaceDomWidgetPreservingNode,
@@ -2738,6 +2739,11 @@ app.registerExtension({
     if (nodeData?.name !== TARGET_NODE) {
       return;
     }
+
+    const configure = nodeType.prototype.configure;
+    nodeType.prototype.configure = function (serializedNode) {
+      return configure?.call(this, migrateCropMaskSerializedNode(serializedNode));
+    };
 
     const onRemoved = nodeType.prototype.onRemoved;
     nodeType.prototype.onRemoved = function (...args) {

@@ -197,8 +197,6 @@ def install_test_stubs():
             prompt = "PROMPT"
             extra_pnginfo = "EXTRA_PNGINFO"
             dynprompt = "DYNPROMPT"
-            auth_token_comfy_org = "AUTH_TOKEN_COMFY_ORG"
-            api_key_comfy_org = "API_KEY_COMFY_ORG"
 
         class UploadType:
             image = "image_upload"
@@ -407,10 +405,14 @@ install_test_stubs()
 
 import torch
 
-with mock.patch("urllib.request.urlopen", side_effect=RuntimeError("network disabled in tests")):
+with mock.patch(
+    "urllib.request.urlopen",
+    side_effect=AssertionError("package import must not access the network"),
+) as import_urlopen:
     nodes_module = importlib.import_module("nodes")
     gemini_service_module = importlib.import_module("gemini_image_service")
     package_module = importlib.import_module(PACKAGE_NAME)
+import_urlopen.assert_not_called()
 
 BurveCharacterPlanner = nodes_module.BurveCharacterPlanner
 BurveCharacterRaceDetails = nodes_module.BurveCharacterRaceDetails
@@ -422,6 +424,7 @@ BurveCropMaskLoad = nodes_module.BurveCropMaskLoad
 BurveCropMaskApply = nodes_module.BurveCropMaskApply
 BurveImageInfo = nodes_module.BurveImageInfo
 BurveSaveGeneratedImage = nodes_module.BurveSaveGeneratedImage
+BurvePromptSelector14 = nodes_module.BurvePromptSelector14
 CHARACTER_GEN_PIPE_KIND = nodes_module.CHARACTER_GEN_PIPE_KIND
 CHARACTER_GEN_PIPE_VERSION = nodes_module.CHARACTER_GEN_PIPE_VERSION
 GENERATED_IMAGE_PIPE_KIND = nodes_module.GENERATED_IMAGE_PIPE_KIND
@@ -489,6 +492,125 @@ def make_race_pipe(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+class BundledLocalDataTests(unittest.TestCase):
+    def _assert_valid_data_is_read_without_writing(self, constant_name, loader, payload):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "data.json")
+            encoded = json.dumps(payload, indent=2).encode("utf-8")
+            with open(path, "wb") as handle:
+                handle.write(encoded)
+
+            before_stat = os.stat(path)
+            with mock.patch.object(nodes_module, constant_name, path):
+                self.assertEqual(loader(), payload)
+
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), encoded)
+            self.assertEqual(os.stat(path).st_mtime_ns, before_stat.st_mtime_ns)
+
+    def test_bundled_instruction_and_prompt_data_are_read_only(self):
+        cases = (
+            (
+                "INSTRUCTIONS_FILE",
+                nodes_module.load_instructions,
+                {"version": 7, "presets": [{"title": "Safe", "system": "Use bundled data."}]},
+            ),
+            (
+                "PROMPTS_FILE",
+                nodes_module.load_prompts,
+                {"version": 9, "prompts": [{"title": "Safe", "category": "Test", "system": "Hello"}]},
+            ),
+        )
+        for constant_name, loader, payload in cases:
+            with self.subTest(loader=loader.__name__):
+                self._assert_valid_data_is_read_without_writing(constant_name, loader, payload)
+
+    def test_missing_bundled_data_returns_defaults_without_creating_files(self):
+        cases = (
+            ("INSTRUCTIONS_FILE", nodes_module.load_instructions, {"version": 0, "presets": []}),
+            ("PROMPTS_FILE", nodes_module.load_prompts, {"version": 0, "prompts": []}),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for index, (constant_name, loader, expected) in enumerate(cases):
+                path = os.path.join(temp_dir, f"missing-{index}.json")
+                with self.subTest(loader=loader.__name__):
+                    with mock.patch.object(nodes_module, constant_name, path):
+                        self.assertEqual(loader(), expected)
+                    self.assertFalse(os.path.exists(path))
+
+    def test_malformed_bundled_data_returns_defaults_without_rewriting_files(self):
+        cases = (
+            ("INSTRUCTIONS_FILE", nodes_module.load_instructions, {"version": 0, "presets": []}),
+            ("PROMPTS_FILE", nodes_module.load_prompts, {"version": 0, "prompts": []}),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for index, (constant_name, loader, expected) in enumerate(cases):
+                path = os.path.join(temp_dir, f"malformed-{index}.json")
+                malformed = b"{not valid json"
+                with open(path, "wb") as handle:
+                    handle.write(malformed)
+
+                with self.subTest(loader=loader.__name__):
+                    with mock.patch.object(nodes_module, constant_name, path):
+                        self.assertEqual(loader(), expected)
+                    with open(path, "rb") as handle:
+                        self.assertEqual(handle.read(), malformed)
+
+
+class BurvePromptSelector14Tests(unittest.TestCase):
+    def setUp(self):
+        self.node = BurvePromptSelector14()
+        self.prompts = {f"prompt_{index}": f"Prompt {index}" for index in range(1, 15)}
+
+    def _assert_queue_apis_untouched(self, action):
+        interrupt = mock.Mock(name="interrupt_current_processing")
+        wipe = mock.Mock(name="prompt_queue.wipe")
+        fake_management = pytypes.ModuleType("comfy.model_management")
+        fake_management.interrupt_current_processing = interrupt
+        fake_server = pytypes.ModuleType("server")
+        fake_server.PromptServer = pytypes.SimpleNamespace(
+            instance=pytypes.SimpleNamespace(prompt_queue=pytypes.SimpleNamespace(wipe=wipe))
+        )
+
+        with mock.patch.dict(
+            sys.modules,
+            {"comfy.model_management": fake_management, "server": fake_server},
+        ):
+            action()
+
+        interrupt.assert_not_called()
+        wipe.assert_not_called()
+
+    def test_select_returns_requested_prompt_and_index(self):
+        self.assertEqual(
+            self.node.select(index=6, error_on_empty=True, **self.prompts),
+            ("Prompt 6", 6),
+        )
+
+    def test_invalid_index_raises_without_interrupting_or_wiping_queue(self):
+        def action():
+            with self.assertRaisesRegex(ValueError, "Index 15 is out of bounds"):
+                self.node.select(index=15, error_on_empty=True, **self.prompts)
+
+        self._assert_queue_apis_untouched(action)
+
+    def test_required_empty_prompt_raises_without_interrupting_or_wiping_queue(self):
+        prompts = dict(self.prompts, prompt_4="   ")
+
+        def action():
+            with self.assertRaisesRegex(ValueError, "Prompt 4 is empty"):
+                self.node.select(index=4, error_on_empty=True, **prompts)
+
+        self._assert_queue_apis_untouched(action)
+
+    def test_empty_prompt_is_returned_when_error_is_disabled(self):
+        prompts = dict(self.prompts, prompt_4="")
+        self.assertEqual(
+            self.node.select(index=4, error_on_empty=False, **prompts),
+            ("", 4),
+        )
 
 
 class CharacterPlannerHelperTests(unittest.TestCase):
@@ -2221,8 +2343,7 @@ class BurveV3ExtensionTests(unittest.TestCase):
         node_map = self._get_node_map()
         schema = node_map["BurveSaveGeneratedImage"].define_schema()
 
-        self.assertIn("PROMPT", schema.hidden)
-        self.assertIn("EXTRA_PNGINFO", schema.hidden)
+        self.assertEqual(schema.hidden, ["PROMPT", "EXTRA_PNGINFO"])
 
     def test_gemini_schema_uses_dynamic_combo_and_removes_legacy_fields(self):
         node_map = self._get_node_map()
@@ -2434,9 +2555,7 @@ class BurveV3ExtensionTests(unittest.TestCase):
         image_input = schema.inputs[0]
         self.assertEqual(image_input.kwargs["upload"], "image_upload")
         self.assertEqual(image_input.kwargs["image_folder"], "input")
-        self.assertEqual(image_input.kwargs["remote"].route, "/internal/files/input")
-        self.assertTrue(image_input.kwargs["remote"].refresh_button)
-        self.assertEqual(image_input.kwargs["remote"].control_after_refresh, "first")
+        self.assertNotIn("remote", image_input.kwargs)
 
         v1_info = schema.get_v1_info(include_hidden=False)
         self.assertEqual(v1_info["input_order"]["required"], ["image", "aspect_ratio"])
@@ -2815,21 +2934,14 @@ class BurveCropMaskLoadTests(unittest.TestCase):
         self.assertTrue(exists)
         self.assertTrue(resolved.endswith(os.path.join("nested", "example.png")))
 
-    def test_input_types_expose_image_upload_and_remote_refresh(self):
+    def test_input_types_leave_image_refresh_to_the_custom_editor(self):
         input_types = BurveCropMaskLoad.INPUT_TYPES()
         image_spec = input_types["required"]["image"]
         image_meta = image_spec[1]
 
         self.assertTrue(image_meta["image_upload"])
         self.assertEqual(image_meta["image_folder"], "input")
-        self.assertEqual(
-            image_meta["remote"],
-            {
-                "route": "/internal/files/input",
-                "refresh_button": True,
-                "control_after_refresh": "first",
-            },
-        )
+        self.assertNotIn("remote", image_meta)
 
 
 class BurveCropMaskApplyTests(unittest.TestCase):

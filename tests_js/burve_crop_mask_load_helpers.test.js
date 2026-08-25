@@ -330,6 +330,16 @@ test("crop-mask lifecycle never mutates preview widgets from background drawing"
   assert.doesNotMatch(helperSource, /node\.imgs\s*=/);
 });
 
+test("crop-mask workflow values migrate before LiteGraph configure restores widgets", async () => {
+  const frontendPath = path.join(__dirname, "..", "web", "js", "burve_crop_mask_load.js");
+  const frontendSource = await fs.readFile(frontendPath, "utf8");
+
+  assert.match(
+    frontendSource,
+    /configure\?\.call\(this, migrateCropMaskSerializedNode\(serializedNode\)\)/
+  );
+});
+
 test("isClientPointInsideRect returns true for center and boundary points", async () => {
   const { isClientPointInsideRect } = await loadHelperModule();
   const rect = { left: 10, top: 20, width: 100, height: 80 };
@@ -442,6 +452,78 @@ test("selectSyncedImageValue retains the current selection after filtering and s
     }),
     "nested/keep.png"
   );
+});
+
+test("crop-mask workflow migration removes serialized remote toggle and refresh slots", async () => {
+  const { migrateCropMaskSerializedNode } = await loadHelperModule();
+  const editorState = JSON.stringify({ image_name: "portrait.webp [input]", crop: { x: 1, y: 2 } });
+  const serializedNode = {
+    id: 46,
+    widgets_values: ["portrait.webp [input]", false, "refresh", "9:16", editorState, "image"],
+  };
+
+  const migrated = migrateCropMaskSerializedNode(serializedNode);
+
+  assert.notEqual(migrated, serializedNode);
+  assert.deepEqual(migrated.widgets_values, ["portrait.webp [input]", "9:16", editorState]);
+  assert.deepEqual(serializedNode.widgets_values, [
+    "portrait.webp [input]",
+    false,
+    "refresh",
+    "9:16",
+    editorState,
+    "image",
+  ]);
+});
+
+test("crop-mask workflow migration accepts an enabled legacy remote toggle", async () => {
+  const { migrateCropMaskSerializedNode } = await loadHelperModule();
+  const serializedNode = {
+    widgets_values: ["portrait.webp [input]", true, "refresh", "1:1", "", "image"],
+  };
+
+  assert.deepEqual(migrateCropMaskSerializedNode(serializedNode).widgets_values, [
+    "portrait.webp [input]",
+    "1:1",
+    "",
+  ]);
+});
+
+test("crop-mask workflow migration removes compact remote refresh slots", async () => {
+  const { migrateCropMaskSerializedNode } = await loadHelperModule();
+  const editorState = JSON.stringify({ image_name: "nested/image.png [input]" });
+  const serializedNode = {
+    widgets_values: ["nested/image.png [input]", "refresh", "4:3", editorState],
+  };
+
+  assert.deepEqual(migrateCropMaskSerializedNode(serializedNode).widgets_values, [
+    "nested/image.png [input]",
+    "4:3",
+    editorState,
+  ]);
+});
+
+test("crop-mask workflow migration leaves current and malformed layouts unchanged", async () => {
+  const { migrateCropMaskSerializedNode } = await loadHelperModule();
+  const current = { widgets_values: ["image.webp [input]", "1:1", "{}"] };
+  const malformed = { widgets_values: ["image.webp [input]", false, "refresh", 1, {}] };
+
+  assert.equal(migrateCropMaskSerializedNode(current), current);
+  assert.equal(migrateCropMaskSerializedNode(malformed), malformed);
+});
+
+test("crop-mask workflow migration defers to named widget values", async () => {
+  const { migrateCropMaskSerializedNode } = await loadHelperModule();
+  const serializedNode = {
+    widgets_values: ["legacy.webp [input]", false, "refresh", "1:1", "{}", "image"],
+    widgets_values_named: {
+      image: "named.webp [input]",
+      aspect_ratio: "16:9",
+      editor_state_json: "{}",
+    },
+  };
+
+  assert.equal(migrateCropMaskSerializedNode(serializedNode), serializedNode);
 });
 
 test("mask inspection grayscale preserves mask opacity levels", async () => {

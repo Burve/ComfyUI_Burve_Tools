@@ -254,8 +254,6 @@ def _build_v1_hidden(input_types: dict[str, Any]) -> list[Any]:
             "prompt",
             "extra_pnginfo",
             "dynprompt",
-            "auth_token_comfy_org",
-            "api_key_comfy_org",
         )
         if hasattr(IO.Hidden, attr)
     }

@@ -3,9 +3,7 @@ import math
 import json
 import os
 import random
-import ssl
 import time
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -111,9 +109,8 @@ except ImportError:
         RACE_TRAIT_KEYS,
     )
 
-# --- Auto-update logic for system instructions ---
+# --- Bundled system instructions ---
 INSTRUCTIONS_FILE = os.path.join(os.path.dirname(__file__), "system_instructions.json")
-INSTRUCTIONS_URL = "https://raw.githubusercontent.com/Burve/ComfyUI_Burve_Tools/main/system_instructions.json"
 CHARACTER_GEN_PIPE_KIND = "burve.character_gen_pipe"
 CHARACTER_GEN_PIPE_VERSION = 1
 GENERATED_IMAGE_PIPE_KIND = "burve.generated_image_pipe"
@@ -188,34 +185,6 @@ def load_instructions():
     except Exception as e:
         print(f"[BurveTools] Error loading instructions: {e}")
         return {"version": 0, "presets": []}
-
-def update_instructions():
-    print("[BurveTools] Checking for instruction updates...")
-    current_data = load_instructions()
-    current_version = current_data.get("version", 0)
-
-    try:
-        # Create a context that doesn't verify certificates if needed (optional, but good for some envs)
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
-        with urllib.request.urlopen(INSTRUCTIONS_URL, context=ctx, timeout=5) as response:
-            if response.status == 200:
-                remote_data = json.loads(response.read().decode('utf-8'))
-                remote_version = remote_data.get("version", 0)
-                
-                if remote_version > current_version:
-                    print(f"[BurveTools] Updating instructions from v{current_version} to v{remote_version}")
-                    with open(INSTRUCTIONS_FILE, 'w', encoding='utf-8') as f:
-                        json.dump(remote_data, f, indent=2)
-                else:
-                    print("[BurveTools] Instructions are up to date.")
-    except Exception as e:
-        print(f"[BurveTools] Update check failed: {e}")
-
-# Run update on module load
-update_instructions()
 
 class BurveGoogleImageGenBase:
     PROVIDER_ID = "base"
@@ -2026,9 +1995,8 @@ class BurveSystemInstructions:
         
         return (selected_instruction,)
 
-# --- Auto-update logic for prompts ---
+# --- Bundled prompt database ---
 PROMPTS_FILE = os.path.join(os.path.dirname(__file__), "prompts.json")
-PROMPTS_URL = "https://raw.githubusercontent.com/Burve/ComfyUI_Burve_Tools/main/prompts.json"
 
 def load_prompts():
     if not os.path.exists(PROMPTS_FILE):
@@ -2039,33 +2007,6 @@ def load_prompts():
     except Exception as e:
         print(f"[BurveTools] Error loading prompts: {e}")
         return {"version": 0, "prompts": []}
-
-def update_prompts():
-    print("[BurveTools] Checking for prompt updates...")
-    current_data = load_prompts()
-    current_version = current_data.get("version", 0)
-
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        
-        with urllib.request.urlopen(PROMPTS_URL, context=ctx, timeout=5) as response:
-            if response.status == 200:
-                remote_data = json.loads(response.read().decode('utf-8'))
-                remote_version = remote_data.get("version", 0)
-                
-                if remote_version > current_version:
-                    print(f"[BurveTools] Updating prompts from v{current_version} to v{remote_version}")
-                    with open(PROMPTS_FILE, 'w', encoding='utf-8') as f:
-                        json.dump(remote_data, f, indent=2)
-                else:
-                    print("[BurveTools] Prompts are up to date.")
-    except Exception as e:
-        print(f"[BurveTools] Prompt update check failed: {e}")
-
-# Run update on module load
-update_prompts()
 
 class BurveVariableInjector:
     @classmethod
@@ -2189,11 +2130,6 @@ class BurveCropMaskLoad:
                     {
                         "image_upload": True,
                         "image_folder": "input",
-                        "remote": {
-                            "route": "/internal/files/input",
-                            "refresh_button": True,
-                            "control_after_refresh": "first",
-                        },
                     },
                 ),
                 "aspect_ratio": (list(BURVE_CROP_MASK_ASPECT_RATIOS), {"default": "1:1"}),
@@ -3321,31 +3257,6 @@ class BurvePromptSelector14:
     FUNCTION = "select"
     CATEGORY = "BurveTools/Text"
 
-    def _cancel_remaining_queue(self):
-        """
-        Best-effort cancellation of remaining queued runs.
-        Wrapped in try/except to avoid crashing if APIs are unavailable.
-        """
-        # Attempt to interrupt current processing
-        try:
-            import comfy.model_management
-            if hasattr(comfy.model_management, "interrupt_current_processing"):
-                comfy.model_management.interrupt_current_processing()
-        except Exception:
-            pass
-
-        # Attempt to wipe the prompt queue
-        try:
-            import server
-            if hasattr(server, "PromptServer"):
-                ps = server.PromptServer.instance
-                if ps is not None and hasattr(ps, "prompt_queue"):
-                    pq = ps.prompt_queue
-                    if hasattr(pq, "wipe"):
-                        pq.wipe()
-        except Exception:
-            pass
-
     def select(
         self,
         index,
@@ -3360,7 +3271,6 @@ class BurvePromptSelector14:
 
         # Always error if index is out of bounds (not between 1 and 14)
         if index < 1 or index > 14:
-            self._cancel_remaining_queue()
             raise ValueError(
                 f"[BurvePromptSelector14] Index {index} is out of bounds! "
                 f"Must be between 1 and 14."
@@ -3373,9 +3283,6 @@ class BurvePromptSelector14:
 
         # Check for empty prompt if toggle is enabled
         if error_on_empty and (not selected_prompt or not selected_prompt.strip()):
-            # Attempt to cancel remaining queue
-            self._cancel_remaining_queue()
-
             raise ValueError(
                 f"[BurvePromptSelector14] Prompt {selected_index} is empty! "
                 f"Stopping execution. (error_on_empty=True)"

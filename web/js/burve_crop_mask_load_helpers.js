@@ -250,6 +250,58 @@ export function selectSyncedImageValue({ preferredValue = "", currentValue = "",
   return normalizedOptions[0] || "";
 }
 
+function looksLikeCropMaskAspectRatio(value) {
+  return typeof value === "string" && /^\d+:\d+$/.test(value);
+}
+
+function migrateLegacyCropMaskWidgetValues(values) {
+  if (!Array.isArray(values) || typeof values[0] !== "string") {
+    return null;
+  }
+
+  const hasSerializedRemoteToggle =
+    values.length >= 5 &&
+    typeof values[1] === "boolean" &&
+    values[2] === "refresh" &&
+    looksLikeCropMaskAspectRatio(values[3]) &&
+    typeof values[4] === "string";
+  if (hasSerializedRemoteToggle) {
+    return [values[0], values[3], values[4]];
+  }
+
+  const hasCompactRemoteWidgets =
+    values.length >= 4 &&
+    values[1] === "refresh" &&
+    looksLikeCropMaskAspectRatio(values[2]) &&
+    typeof values[3] === "string";
+  if (hasCompactRemoteWidgets) {
+    return [values[0], values[2], values[3]];
+  }
+
+  return null;
+}
+
+export function migrateCropMaskSerializedNode(serializedNode) {
+  if (
+    !serializedNode ||
+    typeof serializedNode !== "object" ||
+    serializedNode.widgets_values_named ||
+    !Array.isArray(serializedNode.widgets_values)
+  ) {
+    return serializedNode;
+  }
+
+  const migratedValues = migrateLegacyCropMaskWidgetValues(serializedNode.widgets_values);
+  if (!migratedValues) {
+    return serializedNode;
+  }
+
+  return {
+    ...serializedNode,
+    widgets_values: migratedValues,
+  };
+}
+
 export function sameStringArray(left, right) {
   if (left === right) {
     return true;

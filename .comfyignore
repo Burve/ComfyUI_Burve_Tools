@@ -1,0 +1,6 @@
+.github/
+.gitignore
+release_notes/
+test_*.py
+tests/
+tests_js/
