@@ -1,0 +1,45 @@
+{
+  "description": "Minimal saved-workflow compatibility fixture for the retired Gemini preview IDs.",
+  "legacy_input_order": [
+    "prompt",
+    "model",
+    "seed",
+    "system_instructions",
+    "reference_images",
+    "character_pipe",
+    "aspect_ratio_override",
+    "request_timeout_seconds",
+    "retry_attempts"
+  ],
+  "legacy_output_order": [
+    "image",
+    "thinking_image",
+    "thinking_process",
+    "system_messages",
+    "generated_image_pipe"
+  ],
+  "nodes": [
+    {
+      "type": "BurveGoogleImageGen",
+      "model": {
+        "model": "gemini-3.1-flash-image-preview",
+        "aspect_ratio": "1:1",
+        "resolution": "1K",
+        "search_mode": "off",
+        "thinking_level": "MINIMAL",
+        "include_thoughts": false,
+        "output_mime_type": "image/png",
+        "prominent_people": "allow"
+      }
+    },
+    {
+      "type": "BurveVertexImageGen",
+      "model": {
+        "model": "gemini-3-pro-image-preview",
+        "aspect_ratio": "16:9",
+        "resolution": "2K",
+        "search_mode": "off"
+      }
+    }
+  ]
+}

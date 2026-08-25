@@ -8,9 +8,15 @@ import {
   buildBucketFillRuns,
   buildImageWidgetValue,
   computeCropMaskWidgetLayout,
+  ensureNativeImagePreviewGuard,
+  evaluateDomWidgetGeometry,
   filterImageOptions,
+  hideCropMaskNativeWidgets,
   isClientPointInsideRect,
   maskAlphaToGrayscale,
+  nextDomWidgetRecoveryState,
+  removeNativeImagePreviewGuard,
+  replaceDomWidgetPreservingNode,
   renderSourceMask,
   sameStringArray,
   selectSyncedImageValue,
@@ -41,8 +47,7 @@ const DEFAULT_IMAGE_PICKER_MODE = "list";
 const IMAGE_PICKER_BODY_HEIGHT = 188;
 const IMAGE_PICKER_LIST_ROWS = 7;
 const NODE_MIN_WIDTH = 560;
-const NODE_WIDGET_VERTICAL_ALLOWANCE = 48;
-const DEFAULT_WIDGET_HEIGHT = CANVAS_MIN_HEIGHT + IMAGE_PICKER_BODY_HEIGHT + 160;
+const INITIAL_WIDGET_MIN_HEIGHT = CANVAS_MIN_HEIGHT + IMAGE_PICKER_BODY_HEIGHT + 160;
 let fallbackImagePickerMode = DEFAULT_IMAGE_PICKER_MODE;
 const activeCropMaskEditors = new Set();
 const GLOBAL_WHEEL_OPTIONS = { capture: true, passive: false };
@@ -132,12 +137,14 @@ function injectStyles() {
   style.id = STYLE_ID;
   style.textContent = `
     .burve-crop-root {
-      display: flex;
-      flex-direction: column;
+      display: grid;
+      grid-template-rows: auto auto minmax(${CANVAS_MIN_HEIGHT}px, 1fr) auto;
       gap: 10px;
       width: 100%;
-      height: auto;
+      max-width: none;
+      height: 100%;
       min-height: 0;
+      min-width: 0;
       box-sizing: border-box;
       padding: 10px;
       border-radius: 14px;
@@ -149,7 +156,7 @@ function injectStyles() {
         inset 0 1px 0 rgba(255, 255, 255, 0.04),
         0 18px 44px rgba(0, 0, 0, 0.22);
       color: #f4efe6;
-      font-family: Georgia, "Times New Roman", serif;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       pointer-events: auto;
     }
     .burve-crop-toolbar,
@@ -158,6 +165,20 @@ function injectStyles() {
       gap: 8px;
       align-items: center;
       flex-wrap: wrap;
+      min-width: 0;
+    }
+    .burve-crop-toolbar {
+      align-items: flex-start;
+    }
+    .burve-crop-toolbar-group {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      flex: 0 1 auto;
+      min-width: 0;
+    }
+    .burve-crop-toolbar-group[data-group="brush"] {
+      flex-wrap: wrap;
     }
     .burve-crop-title {
       font-size: 13px;
@@ -165,6 +186,8 @@ function injectStyles() {
       text-transform: uppercase;
       color: #dcbf7a;
       margin-right: auto;
+      padding: 6px 0;
+      white-space: nowrap;
     }
     .burve-crop-toolbar button,
     .burve-crop-picker-bar button,
@@ -221,6 +244,9 @@ function injectStyles() {
       display: flex;
       flex-direction: column;
       gap: 8px;
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
       padding: 10px;
       border-radius: 12px;
       border: 1px solid rgba(255, 255, 255, 0.07);
@@ -282,8 +308,10 @@ function injectStyles() {
     }
     .burve-crop-picker-body {
       position: relative;
+      width: 100%;
       height: ${IMAGE_PICKER_BODY_HEIGHT}px;
       min-height: ${IMAGE_PICKER_BODY_HEIGHT}px;
+      box-sizing: border-box;
       border-radius: 10px;
       overflow: hidden;
       border: 1px solid rgba(255, 255, 255, 0.07);
@@ -445,10 +473,11 @@ function injectStyles() {
     }
     .burve-crop-canvas-wrap {
       position: relative;
-      flex: 0 0 auto;
       width: 100%;
-      height: ${CANVAS_MIN_HEIGHT}px;
+      height: 100%;
       min-height: ${CANVAS_MIN_HEIGHT}px;
+      min-width: 0;
+      box-sizing: border-box;
       border-radius: 12px;
       overflow: hidden;
       background:
@@ -477,6 +506,9 @@ function injectStyles() {
       justify-content: space-between;
       font-size: 11px;
       color: #b9c0cb;
+    }
+    .burve-crop-status > span {
+      min-width: 0;
     }
   `;
   document.head.appendChild(style);
@@ -683,24 +715,47 @@ class CropMaskEditor {
     this.maskInspectionEnabled = false;
     this.failedThumbnailUrls = new Set();
     this.destroyed = false;
+    this.minimumWidgetHeight = INITIAL_WIDGET_MIN_HEIGHT;
+    this.stabilizationFrame = null;
+    this.stabilizationNeedsDraw = false;
+    this.stabilizationNeedsGuard = false;
+    this.geometryMismatchFrames = 0;
+    this.geometryRemounted = false;
+    this.geometryMountChecksRemaining = 3;
+    this.resizeObserver = null;
+    this.resizeObservedHost = null;
+    this.mutationObserver = null;
+    this.mutationObservedHost = null;
+    this.previewGuard = null;
+    this.domWidgetHookState = null;
+    this.lifecycleRestorers = [];
+    this.widgetCallbackRestorers = [];
     injectStyles();
     this.root = document.createElement("div");
     this.root.className = "burve-crop-root";
     this.root.innerHTML = `
       <div class="burve-crop-toolbar">
         <div class="burve-crop-title">Burve Crop Lab</div>
-        <button data-tool="crop" class="active">Crop</button>
-        <button data-tool="paint">Paint</button>
-        <button data-tool="erase">Erase</button>
-        <button data-tool="bucket" title="Fill the connected unmasked area under the cursor">Bucket</button>
-        <label>Brush Size <input data-role="brush-size" type="range" min="4" max="256" step="1" value="${DEFAULT_BRUSH_RADIUS}" /><span class="burve-crop-value" data-role="brush-value">${DEFAULT_BRUSH_RADIUS}px</span></label>
-        <label>Softness <input data-role="softness" type="range" min="0" max="1" step="0.01" value="${DEFAULT_BRUSH_SOFTNESS}" /></label>
-        <button data-action="fit">Fit</button>
-        <button data-action="reset-crop">Reset Crop</button>
-        <button data-action="clear-mask">Clear Mask</button>
-        <button data-action="fill-mask" title="Mask the entire current crop">Fill Mask</button>
-        <button data-action="undo-mask" data-role="undo-mask" disabled>Undo Last</button>
-        <button type="button" data-role="mask-inspection" aria-pressed="false" title="Show mask strength as grayscale: black is unmasked, white is fully masked">Mask Check</button>
+        <div class="burve-crop-toolbar-group" data-group="tools">
+          <button data-tool="crop" class="active">Crop</button>
+          <button data-tool="paint">Paint</button>
+          <button data-tool="erase">Erase</button>
+          <button data-tool="bucket" title="Fill the connected unmasked area under the cursor">Bucket</button>
+        </div>
+        <div class="burve-crop-toolbar-group" data-group="brush">
+          <label>Brush Size <input data-role="brush-size" type="range" min="4" max="256" step="1" value="${DEFAULT_BRUSH_RADIUS}" /><span class="burve-crop-value" data-role="brush-value">${DEFAULT_BRUSH_RADIUS}px</span></label>
+          <label>Softness <input data-role="softness" type="range" min="0" max="1" step="0.01" value="${DEFAULT_BRUSH_SOFTNESS}" /></label>
+        </div>
+        <div class="burve-crop-toolbar-group" data-group="crop-actions">
+          <button data-action="fit">Fit</button>
+          <button data-action="reset-crop">Reset Crop</button>
+        </div>
+        <div class="burve-crop-toolbar-group" data-group="mask-actions">
+          <button data-action="clear-mask">Clear Mask</button>
+          <button data-action="fill-mask" title="Mask the entire current crop">Fill Mask</button>
+          <button data-action="undo-mask" data-role="undo-mask" disabled>Undo Last</button>
+          <button type="button" data-role="mask-inspection" aria-pressed="false" title="Show mask strength as grayscale: black is unmasked, white is fully masked">Mask Check</button>
+        </div>
       </div>
       <div class="burve-crop-picker">
         <div class="burve-crop-picker-bar">
@@ -761,7 +816,6 @@ class CropMaskEditor {
     this.uploadImageButton = this.root.querySelector('[data-role="upload-image"]');
     this.refreshImagesButton = this.root.querySelector('[data-role="refresh-images"]');
     this.tool = "crop";
-    this.widgetHeight = DEFAULT_WIDGET_HEIGHT;
     this.stageMetrics = {
       cssWidth: 320,
       cssHeight: CANVAS_MIN_HEIGHT,
@@ -853,24 +907,19 @@ class CropMaskEditor {
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
 
-    this.domWidget = node.addDOMWidget("burve_crop_mask_editor", "BURVE_CROP_MASK_EDITOR", this.root, {
-      hideOnZoom: false,
-      getHeight: () => this.widgetHeight,
-      getMinHeight: () => this.widgetHeight,
-      getMaxHeight: () => this.widgetHeight,
-      getValue: () => "",
-      setValue: () => {},
-      afterResize: () => this.draw(),
-    });
-    this.domWidget.serialize = false;
+    this.domWidget = this.createDomWidget();
     this.hideStateWidget();
-    this.hideImageWidget();
+    this.hideNativeImageWidgets();
+    this.previewGuard = ensureNativeImagePreviewGuard(this.node).guard;
     this.installWidgetCallbacks();
+    this.installNodeLifecycleHooks();
+    this.installGeometryObservers();
     this.updateBrushValue();
     this.setImagePickerMode(this.imagePickerMode, { persist: false });
     this.refreshFromWidgets(true);
     void this.syncImageOptions({ force: true });
-    this.updateNodeSize();
+    this.ensureMinimumNodeSize();
+    this.scheduleStabilization({ draw: true, ensureGuard: true });
     registerActiveCropMaskEditor(this);
   }
 
@@ -975,6 +1024,60 @@ class CropMaskEditor {
     void this.uploadDroppedImage(file);
   };
 
+  createDomWidget() {
+    const hookNames = ["onAdded", "onRemoved", "onResize"];
+    const previousHooks = new Map(
+      hookNames.map((name) => [
+        name,
+        {
+          hadOwn: Object.prototype.hasOwnProperty.call(this.node, name),
+          value: this.node[name],
+        },
+      ])
+    );
+    const widget = this.node.addDOMWidget(
+      "burve_crop_mask_editor",
+      "BURVE_CROP_MASK_EDITOR",
+      this.root,
+      {
+        hideOnZoom: false,
+        getValue: () => "",
+        setValue: () => {},
+        afterResize: () => this.scheduleStabilization({ draw: true, ensureGuard: true }),
+      }
+    );
+    widget.serialize = false;
+    widget.computeLayoutSize = () => ({
+      minHeight: this.minimumWidgetHeight,
+      minWidth: NODE_MIN_WIDTH,
+    });
+    this.domWidgetHookState = {
+      widget,
+      hooks: new Map(
+        hookNames.map((name) => [name, { ...previousHooks.get(name), installed: this.node[name] }])
+      ),
+    };
+    return widget;
+  }
+
+  restoreDomWidgetHooks(widget = this.domWidget) {
+    const state = this.domWidgetHookState;
+    if (!state || state.widget !== widget) {
+      return;
+    }
+    for (const [name, hook] of state.hooks) {
+      if (this.node[name] !== hook.installed) {
+        continue;
+      }
+      if (hook.hadOwn) {
+        this.node[name] = hook.value;
+      } else {
+        delete this.node[name];
+      }
+    }
+    this.domWidgetHookState = null;
+  }
+
   destroy() {
     if (this.destroyed) {
       return;
@@ -983,6 +1086,29 @@ class CropMaskEditor {
     unregisterActiveCropMaskEditor(this);
     window.clearTimeout(this.saveTimer);
     window.clearTimeout(this.statusTimer);
+    if (this.stabilizationFrame != null) {
+      window.cancelAnimationFrame(this.stabilizationFrame);
+      this.stabilizationFrame = null;
+    }
+    this.resizeObserver?.disconnect?.();
+    this.resizeObserver = null;
+    this.resizeObservedHost = null;
+    this.mutationObserver?.disconnect?.();
+    this.mutationObserver = null;
+    this.mutationObservedHost = null;
+    try {
+      removeNativeImagePreviewGuard(this.node, this.previewGuard);
+    } catch (error) {
+      console.warn("[Burve Crop + Mask Load] Could not remove native preview guard", error);
+    }
+    this.previewGuard = null;
+    for (const restore of this.widgetCallbackRestorers.splice(0).reverse()) {
+      restore();
+    }
+    for (const restore of this.lifecycleRestorers.splice(0).reverse()) {
+      restore();
+    }
+    this.restoreDomWidgetHooks();
     this.root.removeEventListener("dragenter", this.onDragEnter);
     this.root.removeEventListener("dragover", this.onDragOver);
     this.root.removeEventListener("dragleave", this.onDragLeave);
@@ -992,15 +1118,238 @@ class CropMaskEditor {
     window.removeEventListener("keyup", this.onKeyUp);
   }
 
-  updateNodeSize() {
+  scheduleLayout() {
+    this.scheduleStabilization({ draw: true, ensureGuard: true });
+  }
+
+  scheduleStabilization({ draw = false, ensureGuard = false } = {}) {
+    if (this.destroyed) {
+      return;
+    }
+    this.stabilizationNeedsDraw ||= draw;
+    this.stabilizationNeedsGuard ||= ensureGuard;
+    if (this.stabilizationFrame != null) {
+      return;
+    }
+    this.stabilizationFrame = window.requestAnimationFrame(() => {
+      this.stabilizationFrame = null;
+      if (this.destroyed) {
+        return;
+      }
+      const shouldDraw = this.stabilizationNeedsDraw;
+      const shouldEnsureGuard = this.stabilizationNeedsGuard;
+      this.stabilizationNeedsDraw = false;
+      this.stabilizationNeedsGuard = false;
+      this.stabilizeDomWidget({ ensureGuard: shouldEnsureGuard });
+      if (shouldDraw && !this.destroyed) {
+        this.draw({ scheduleStabilization: false });
+      }
+    });
+  }
+
+  installGeometryObservers() {
+    if (typeof ResizeObserver === "function") {
+      this.resizeObserver = new ResizeObserver(() =>
+        this.scheduleStabilization({ draw: true, ensureGuard: true })
+      );
+      this.resizeObserver.observe(this.root);
+    }
+    if (typeof MutationObserver === "function") {
+      this.mutationObserver = new MutationObserver(() =>
+        this.scheduleStabilization({ draw: true, ensureGuard: true })
+      );
+    }
+    this.observeWidgetHost();
+  }
+
+  getWidgetHost() {
+    const host = this.root.parentElement;
+    return host?.classList?.contains("dom-widget") ? host : null;
+  }
+
+  observeWidgetHost() {
+    const host = this.getWidgetHost();
+    if (!host) {
+      return;
+    }
+    if (this.resizeObserver && host !== this.resizeObservedHost) {
+      if (this.resizeObservedHost) {
+        this.resizeObserver.unobserve?.(this.resizeObservedHost);
+      }
+      this.resizeObserver.observe(host);
+      this.resizeObservedHost = host;
+    }
+    if (this.mutationObserver && host !== this.mutationObservedHost) {
+      this.mutationObserver.disconnect();
+      this.mutationObserver.observe(host, {
+        attributes: true,
+        attributeFilter: ["style", "class"],
+      });
+      if (host.parentElement) {
+        this.mutationObserver.observe(host.parentElement, { childList: true });
+      }
+      this.mutationObservedHost = host;
+    }
+  }
+
+  hideNativeImageWidgets() {
+    hideCropMaskNativeWidgets(this.node);
+  }
+
+  ensurePreviewGuard() {
+    try {
+      const result = ensureNativeImagePreviewGuard(this.node);
+      this.previewGuard = result.guard;
+      if (result.added || result.removedCount) {
+        this.node._widgetSlotsDirty = true;
+        this.node.graph?.setDirtyCanvas?.(true, true);
+      }
+    } catch (error) {
+      console.warn("[Burve Crop + Mask Load] Could not stabilize native preview UI", error);
+    }
+  }
+
+  inspectDomWidgetGeometry() {
+    const host = this.getWidgetHost();
+    if (!host || !host.isConnected || !this.domWidget) {
+      return { status: "transient", healthy: false };
+    }
+    const rect = host.getBoundingClientRect?.();
+    const widgetWidth = Number(this.domWidget.width);
+    return evaluateDomWidgetGeometry({
+      nodeWidth: this.node.size?.[0],
+      widgetWidth: Number.isFinite(widgetWidth) && widgetWidth > 0 ? widgetWidth : undefined,
+      widgetHeight: this.domWidget.computedHeight,
+      margin: this.domWidget.margin,
+      hostClientWidth: host.clientWidth,
+      hostClientHeight: host.clientHeight,
+      hostRectWidth: rect?.width,
+      hostRectHeight: rect?.height,
+      graphScale: app.canvas?.ds?.scale,
+    });
+  }
+
+  requestDomWidgetReflow() {
+    if (!this.domWidget) {
+      return;
+    }
+    this.domWidget.width = undefined;
+    this.node._widgetSlotsDirty = true;
+    this.node.graph?.setDirtyCanvas?.(true, true);
+    app.canvas?.setDirty?.(true, true);
+    this.scheduleStabilization({ draw: true, ensureGuard: true });
+  }
+
+  remountDomWidget() {
+    const previousWidget = this.domWidget;
+    if (!previousWidget || typeof this.node.removeWidget !== "function") {
+      return false;
+    }
+    try {
+      if (this.resizeObservedHost) {
+        this.resizeObserver?.unobserve?.(this.resizeObservedHost);
+      }
+      this.mutationObserver?.disconnect?.();
+      this.resizeObservedHost = null;
+      this.mutationObservedHost = null;
+      this.domWidget = replaceDomWidgetPreservingNode({
+        node: this.node,
+        currentWidget: previousWidget,
+        beforeRemove: () => this.restoreDomWidgetHooks(previousWidget),
+        createWidget: () => this.createDomWidget(),
+      });
+      this.geometryMountChecksRemaining = 3;
+      this.node._widgetSlotsDirty = true;
+      this.node.graph?.setDirtyCanvas?.(true, true);
+      app.canvas?.setDirty?.(true, true);
+      this.scheduleStabilization({ draw: true, ensureGuard: true });
+      return true;
+    } catch (error) {
+      console.warn("[Burve Crop + Mask Load] Could not remount DOM widget", error);
+      return false;
+    }
+  }
+
+  stabilizeDomWidget({ ensureGuard = false } = {}) {
+    this.observeWidgetHost();
+    this.hideNativeImageWidgets();
+    if (ensureGuard || !this.previewGuard || !this.node.widgets?.includes?.(this.previewGuard)) {
+      this.ensurePreviewGuard();
+    }
+
+    const geometry = this.inspectDomWidgetGeometry();
+    const recovery = nextDomWidgetRecoveryState({
+      geometryStatus: geometry.status,
+      mismatchFrames: this.geometryMismatchFrames,
+      remounted: this.geometryRemounted,
+    });
+    this.geometryMismatchFrames = recovery.mismatchFrames;
+    this.geometryRemounted = recovery.remounted;
+
+    if (geometry.status === "healthy") {
+      this.geometryMountChecksRemaining = 0;
+      return;
+    }
+    if (geometry.status === "transient") {
+      if (this.geometryMountChecksRemaining > 0) {
+        this.geometryMountChecksRemaining -= 1;
+        this.scheduleStabilization({ draw: true, ensureGuard: true });
+      }
+      return;
+    }
+    if (recovery.action === "reflow") {
+      this.requestDomWidgetReflow();
+    } else if (recovery.action === "remount") {
+      if (!this.remountDomWidget()) {
+        this.geometryRemounted = false;
+      }
+    }
+  }
+
+  ensureMinimumNodeSize() {
     const currentWidth = Number(this.node.size?.[0]) || 0;
     const currentHeight = Number(this.node.size?.[1]) || 0;
-    const nextWidth = Math.max(currentWidth, NODE_MIN_WIDTH);
-    const nextHeight = Math.ceil(this.widgetHeight + NODE_WIDGET_VERTICAL_ALLOWANCE);
+    const computedSize = this.node.computeSize?.() ?? [0, 0];
+    const minimumWidth = Math.max(NODE_MIN_WIDTH, Number(computedSize?.[0]) || 0);
+    const minimumHeight = Math.max(this.minimumWidgetHeight, Number(computedSize?.[1]) || 0);
+    const nextWidth = Math.max(currentWidth, minimumWidth);
+    const nextHeight = Math.max(currentHeight, minimumHeight);
 
     if (currentWidth !== nextWidth || currentHeight !== nextHeight) {
-      this.node.size = [nextWidth, nextHeight];
+      if (typeof this.node.setSize === "function") {
+        this.node.setSize([nextWidth, nextHeight]);
+      } else {
+        this.node.size = [nextWidth, nextHeight];
+      }
     }
+  }
+
+  installNodeLifecycleHooks() {
+    const wrap = (name) => {
+      const hadOwnHandler = Object.prototype.hasOwnProperty.call(this.node, name);
+      const previous = this.node[name];
+      const editor = this;
+      const wrapped = function (...args) {
+        try {
+          return previous?.apply(this, args);
+        } finally {
+          editor.scheduleStabilization({ draw: true, ensureGuard: true });
+        }
+      };
+      this.node[name] = wrapped;
+      this.lifecycleRestorers.push(() => {
+        if (this.node[name] === wrapped) {
+          if (hadOwnHandler) {
+            this.node[name] = previous;
+          } else {
+            delete this.node[name];
+          }
+        }
+      });
+    };
+
+    wrap("onConfigure");
+    wrap("onExecuted");
   }
 
   hideStateWidget() {
@@ -1009,14 +1358,6 @@ class CropMaskEditor {
     }
     this.stateWidget.hidden = true;
     this.stateWidget.computeSize = () => [0, -4];
-  }
-
-  hideImageWidget() {
-    if (!this.imageWidget || !this.imageListSelect || !this.imageGrid) {
-      return;
-    }
-    this.imageWidget.hidden = true;
-    this.imageWidget.computeSize = () => [0, -4];
   }
 
   installWidgetCallbacks() {
@@ -1028,8 +1369,15 @@ class CropMaskEditor {
       widget.callback = (...args) => {
         const result = previous?.apply(widget, args);
         this.refreshFromWidgets();
+        this.scheduleStabilization({ draw: true, ensureGuard: true });
         return result;
       };
+      const wrapped = widget.callback;
+      this.widgetCallbackRestorers.push(() => {
+        if (widget.callback === wrapped) {
+          widget.callback = previous;
+        }
+      });
     });
   }
 
@@ -1082,8 +1430,8 @@ class CropMaskEditor {
 
     if (this.pickerCount) {
       this.pickerCount.textContent = normalizedQuery
-        ? `${filteredOptions.length}/${allOptions.length} images`
-        : `${allOptions.length} image${allOptions.length === 1 ? "" : "s"}`;
+        ? `${filteredOptions.length}/${allOptions.length}\u00a0image${allOptions.length === 1 ? "" : "s"}`
+        : `${allOptions.length}\u00a0image${allOptions.length === 1 ? "" : "s"}`;
     }
 
     this.pickerModeButtons.forEach((button) => {
@@ -1517,6 +1865,7 @@ class CropMaskEditor {
   refreshFromWidgets(force = false) {
     const imageValue = this.getImageValue();
     const ratioValue = this.getRatioValue();
+    this.scheduleStabilization({ draw: false, ensureGuard: true });
     this.renderImagePicker();
     if (!force && imageValue === this.lastWidgetImage && ratioValue === this.lastWidgetRatio) {
       return;
@@ -1582,6 +1931,7 @@ class CropMaskEditor {
   }
 
   layoutStage() {
+    this.observeWidgetHost();
     const rootStyles = window.getComputedStyle(this.root);
     const paddingTop = Number.parseFloat(rootStyles.paddingTop || "0") || 0;
     const paddingBottom = Number.parseFloat(rootStyles.paddingBottom || "0") || 0;
@@ -1589,26 +1939,34 @@ class CropMaskEditor {
     const toolbarHeight = Math.ceil(this.toolbar?.offsetHeight || this.toolbar?.clientHeight || 0);
     const pickerHeight = Math.ceil(this.pickerPanel?.offsetHeight || this.pickerPanel?.clientHeight || 0);
     const statusHeight = Math.ceil(this.statusBar?.offsetHeight || this.statusBar?.clientHeight || 0);
+    const chromeWasMeasured = toolbarHeight > 0 && pickerHeight > 0 && statusHeight > 0;
     const chromeHeight = paddingTop + paddingBottom + toolbarHeight + pickerHeight + statusHeight + gap * 3;
+    const widgetHost = this.getWidgetHost();
+    const allocatedHeight =
+      Number(widgetHost?.clientHeight) ||
+      Number(this.domWidget?.computedHeight) ||
+      Number(this.root.clientHeight) ||
+      this.minimumWidgetHeight;
     const layout = computeCropMaskWidgetLayout({
-      widgetHeight: this.widgetHeight,
+      availableHeight: allocatedHeight,
       chromeHeight,
       minCanvasHeight: CANVAS_MIN_HEIGHT,
     });
 
-    if (this.widgetHeight !== layout.widgetHeight) {
-      this.widgetHeight = layout.widgetHeight;
-      this.updateNodeSize();
-      app.graph?.setDirtyCanvas?.(true, true);
+    if (chromeWasMeasured && this.minimumWidgetHeight !== layout.minWidgetHeight) {
+      this.minimumWidgetHeight = layout.minWidgetHeight;
+      this.ensureMinimumNodeSize();
+      this.node.graph?.setDirtyCanvas?.(true, true);
     }
 
     const hostHeight = layout.widgetHeight;
     const stageHeight = layout.canvasHeight;
     this.root.style.height = `${hostHeight}px`;
+    this.root.style.width = "100%";
     this.canvasWrap.style.height = `${stageHeight}px`;
-    this.canvasWrap.style.minHeight = `${stageHeight}px`;
+    this.canvasWrap.style.minHeight = `${CANVAS_MIN_HEIGHT}px`;
 
-    const cssWidth = Math.max(320, Math.floor(this.canvasWrap.clientWidth || this.stageMetrics.cssWidth || 320));
+    const cssWidth = Math.max(1, Math.floor(this.canvasWrap.clientWidth || this.stageMetrics.cssWidth || 320));
     const cssHeight = Math.max(1, Math.floor(this.canvasWrap.clientHeight || stageHeight || this.stageMetrics.cssHeight || CANVAS_MIN_HEIGHT));
     const dpr = Math.max(window.devicePixelRatio || 1, 1);
     const targetWidth = Math.max(1, Math.round(cssWidth * dpr));
@@ -2311,7 +2669,10 @@ class CropMaskEditor {
     this.ctx.restore();
   }
 
-  draw() {
+  draw({ scheduleStabilization = true } = {}) {
+    if (scheduleStabilization) {
+      this.scheduleStabilization({ draw: false, ensureGuard: true });
+    }
     this.layoutStage();
     this.ctx.clearRect(0, 0, this.stageMetrics.cssWidth, this.stageMetrics.cssHeight);
 
@@ -2319,7 +2680,7 @@ class CropMaskEditor {
       this.updateMaskActionButtons();
       this.cropInfo.textContent = this.statusOverride || "No image selected";
       this.ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
-      this.ctx.font = "16px Georgia";
+      this.ctx.font = "16px system-ui, sans-serif";
       this.ctx.fillText("Select an input image to begin.", 24, 36);
       return;
     }

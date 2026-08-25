@@ -26,61 +26,308 @@ test("buildImageWidgetValue prefixes nested subfolders", async () => {
   assert.equal(buildImageWidgetValue({ name: "x.png", subfolder: "nested" }), "nested/x.png");
 });
 
-test("computeCropMaskWidgetLayout keeps default widget height stable across repeated layouts", async () => {
+test("computeCropMaskWidgetLayout gives extra editor height to the canvas", async () => {
   const { computeCropMaskWidgetLayout } = await loadHelperModule();
   const first = computeCropMaskWidgetLayout({
-    widgetHeight: 768,
+    availableHeight: 900,
     chromeHeight: 318,
     minCanvasHeight: 420,
   });
   const second = computeCropMaskWidgetLayout({
-    widgetHeight: first.widgetHeight,
+    availableHeight: first.widgetHeight,
     chromeHeight: 318,
     minCanvasHeight: 420,
   });
 
-  assert.deepEqual(first, { widgetHeight: 768, canvasHeight: 450 });
+  assert.deepEqual(first, { minWidgetHeight: 738, widgetHeight: 900, canvasHeight: 582 });
   assert.deepEqual(second, first);
 });
 
-test("computeCropMaskWidgetLayout grows only to fit larger chrome", async () => {
+test("computeCropMaskWidgetLayout shrinks the canvas when available height decreases", async () => {
   const { computeCropMaskWidgetLayout } = await loadHelperModule();
-  const first = computeCropMaskWidgetLayout({
-    widgetHeight: 768,
-    chromeHeight: 390,
+  const tall = computeCropMaskWidgetLayout({
+    availableHeight: 1100,
+    chromeHeight: 318,
     minCanvasHeight: 420,
   });
-  const second = computeCropMaskWidgetLayout({
-    widgetHeight: first.widgetHeight,
-    chromeHeight: 390,
+  const shorter = computeCropMaskWidgetLayout({
+    availableHeight: 800,
+    chromeHeight: 318,
     minCanvasHeight: 420,
   });
 
-  assert.deepEqual(first, { widgetHeight: 810, canvasHeight: 420 });
-  assert.deepEqual(second, first);
+  assert.equal(tall.canvasHeight, 782);
+  assert.deepEqual(shorter, { minWidgetHeight: 738, widgetHeight: 800, canvasHeight: 482 });
 });
 
-test("computeCropMaskWidgetLayout ignores parent DOM height inputs", async () => {
+test("computeCropMaskWidgetLayout raises the minimum for wrapped chrome", async () => {
   const { computeCropMaskWidgetLayout } = await loadHelperModule();
   const layout = computeCropMaskWidgetLayout({
-    widgetHeight: 768,
-    chromeHeight: 318,
+    availableHeight: 768,
+    chromeHeight: 390,
     minCanvasHeight: 420,
-    parentHeight: 10000,
   });
 
-  assert.deepEqual(layout, { widgetHeight: 768, canvasHeight: 450 });
+  assert.deepEqual(layout, { minWidgetHeight: 810, widgetHeight: 810, canvasHeight: 420 });
 });
 
 test("computeCropMaskWidgetLayout keeps canvas height at least one pixel", async () => {
   const { computeCropMaskWidgetLayout } = await loadHelperModule();
   const layout = computeCropMaskWidgetLayout({
-    widgetHeight: 10,
+    availableHeight: 10,
     chromeHeight: 50,
     minCanvasHeight: -100,
   });
 
-  assert.deepEqual(layout, { widgetHeight: 10, canvasHeight: 1 });
+  assert.deepEqual(layout, { minWidgetHeight: 51, widgetHeight: 51, canvasHeight: 1 });
+});
+
+test("hideCropMaskNativeWidgets hides only auxiliary image widgets", async () => {
+  const { hideCropMaskNativeWidgets } = await loadHelperModule();
+  const callback = () => {};
+  const imageWidget = { name: "image", value: "keep.png", callback, serialize: true };
+  const uploadWidget = { name: "upload" };
+  const refreshWidget = { name: "refresh" };
+  const autoRefreshWidget = { name: "Auto-refresh after generation", value: false };
+  const ratioWidget = { name: "aspect_ratio", value: "9:16" };
+  const node = { widgets: [imageWidget, uploadWidget, refreshWidget, autoRefreshWidget, ratioWidget] };
+
+  assert.equal(hideCropMaskNativeWidgets(node), 4);
+  for (const widget of [imageWidget, uploadWidget, refreshWidget, autoRefreshWidget]) {
+    assert.equal(widget.hidden, true);
+    assert.deepEqual(widget.computeSize(), [0, -4]);
+  }
+  assert.equal(imageWidget.value, "keep.png");
+  assert.equal(imageWidget.callback, callback);
+  assert.equal(imageWidget.serialize, true);
+  assert.equal(ratioWidget.hidden, undefined);
+  assert.equal(ratioWidget.computeSize, undefined);
+});
+
+test("native preview guard replaces an existing preview through node APIs", async () => {
+  const { ensureNativeImagePreviewGuard, isNativeImagePreviewGuard } = await loadHelperModule();
+  let cleanupCount = 0;
+  const keepWidget = { name: "burve_crop_mask_editor" };
+  const previewWidget = {
+    name: "$$canvas-image-preview",
+    onRemove() {
+      cleanupCount += 1;
+    },
+  };
+  const node = {
+    widgets: [keepWidget, previewWidget],
+    imgs: [{ src: "preview.png" }],
+    imageIndex: 2,
+    overIndex: 1,
+    removeWidget(widget) {
+      const index = this.widgets.indexOf(widget);
+      assert.notEqual(index, -1);
+      widget.onRemove?.();
+      this.widgets.splice(index, 1);
+      this._widgetSlotsDirty = true;
+    },
+    addCustomWidget(widget) {
+      this.widgets.push(widget);
+      this._widgetSlotsDirty = true;
+      return widget;
+    },
+  };
+
+  const first = ensureNativeImagePreviewGuard(node);
+  assert.equal(first.added, true);
+  assert.equal(first.removedCount, 1);
+  assert.equal(cleanupCount, 1);
+  assert.equal(node.widgets[0], keepWidget);
+  assert.equal(isNativeImagePreviewGuard(first.guard), true);
+  assert.equal(first.guard.name, "$$canvas-image-preview");
+  assert.equal(first.guard.hidden, true);
+  assert.equal(first.guard.serialize, false);
+  assert.deepEqual(first.guard.computeSize(), [0, -4]);
+  assert.deepEqual(first.guard.computeLayoutSize(), {
+    minHeight: 0,
+    maxHeight: 0,
+    minWidth: 0,
+    maxWidth: 0,
+  });
+  assert.deepEqual(node.imgs, [{ src: "preview.png" }]);
+  assert.equal(node.imageIndex, 2);
+  assert.equal(node.overIndex, 1);
+
+  node.imgs = [{ src: "later-preview.png" }];
+  const second = ensureNativeImagePreviewGuard(node);
+  assert.equal(second.guard, first.guard);
+  assert.equal(second.added, false);
+  assert.equal(second.removedCount, 0);
+  assert.equal(node.widgets.filter((widget) => widget.name === "$$canvas-image-preview").length, 1);
+  assert.equal(cleanupCount, 1);
+});
+
+test("native preview guard can be removed without disturbing unrelated widgets", async () => {
+  const { ensureNativeImagePreviewGuard, removeNativeImagePreviewGuard } = await loadHelperModule();
+  const keepWidget = { name: "aspect_ratio" };
+  const node = {
+    widgets: [keepWidget],
+    removeWidget(widget) {
+      this.widgets.splice(this.widgets.indexOf(widget), 1);
+    },
+    addCustomWidget(widget) {
+      this.widgets.push(widget);
+      return widget;
+    },
+  };
+  const { guard } = ensureNativeImagePreviewGuard(node);
+
+  assert.equal(removeNativeImagePreviewGuard(node, guard), true);
+  assert.deepEqual(node.widgets, [keepWidget]);
+  assert.equal(removeNativeImagePreviewGuard(node, guard), false);
+});
+
+test("DOM widget geometry accepts matching logical size and graph scale", async () => {
+  const { evaluateDomWidgetGeometry } = await loadHelperModule();
+  const geometry = evaluateDomWidgetGeometry({
+    nodeWidth: 580,
+    widgetHeight: 760,
+    margin: 10,
+    hostClientWidth: 560,
+    hostClientHeight: 740,
+    hostRectWidth: 280,
+    hostRectHeight: 370,
+    graphScale: 0.5,
+  });
+
+  assert.equal(geometry.status, "healthy");
+  assert.equal(geometry.widthMatches, true);
+  assert.equal(geometry.heightMatches, true);
+  assert.equal(geometry.scaleMatches, true);
+});
+
+test("DOM widget geometry detects half-width allocation and stale transform scale", async () => {
+  const { evaluateDomWidgetGeometry } = await loadHelperModule();
+  const halfWidth = evaluateDomWidgetGeometry({
+    nodeWidth: 580,
+    widgetHeight: 760,
+    margin: 10,
+    hostClientWidth: 280,
+    hostClientHeight: 740,
+    hostRectWidth: 140,
+    hostRectHeight: 370,
+    graphScale: 0.5,
+  });
+  const staleTransform = evaluateDomWidgetGeometry({
+    nodeWidth: 580,
+    widgetHeight: 760,
+    margin: 10,
+    hostClientWidth: 560,
+    hostClientHeight: 740,
+    hostRectWidth: 140,
+    hostRectHeight: 185,
+    graphScale: 0.5,
+  });
+
+  assert.equal(halfWidth.status, "mismatch");
+  assert.equal(halfWidth.widthMatches, false);
+  assert.equal(halfWidth.scaleMatches, true);
+  assert.equal(staleTransform.status, "mismatch");
+  assert.equal(staleTransform.widthMatches, true);
+  assert.equal(staleTransform.scaleMatches, false);
+});
+
+test("DOM widget geometry ignores unmounted and zero-sized transient hosts", async () => {
+  const { evaluateDomWidgetGeometry } = await loadHelperModule();
+  const geometry = evaluateDomWidgetGeometry({
+    nodeWidth: 580,
+    widgetHeight: 760,
+    margin: 10,
+    hostClientWidth: 0,
+    hostClientHeight: 0,
+    hostRectWidth: 0,
+    hostRectHeight: 0,
+    graphScale: 0.5,
+  });
+
+  assert.equal(geometry.status, "transient");
+});
+
+test("DOM widget recovery reflows once, remounts once, and resets when healthy", async () => {
+  const { nextDomWidgetRecoveryState } = await loadHelperModule();
+  const first = nextDomWidgetRecoveryState({ geometryStatus: "mismatch" });
+  const second = nextDomWidgetRecoveryState({
+    geometryStatus: "mismatch",
+    mismatchFrames: first.mismatchFrames,
+    remounted: first.remounted,
+  });
+  const third = nextDomWidgetRecoveryState({
+    geometryStatus: "mismatch",
+    mismatchFrames: second.mismatchFrames,
+    remounted: second.remounted,
+  });
+  const healthy = nextDomWidgetRecoveryState({
+    geometryStatus: "healthy",
+    mismatchFrames: third.mismatchFrames,
+    remounted: third.remounted,
+  });
+
+  assert.deepEqual(first, { action: "reflow", mismatchFrames: 1, remounted: false });
+  assert.deepEqual(second, { action: "remount", mismatchFrames: 2, remounted: true });
+  assert.deepEqual(third, { action: "none", mismatchFrames: 3, remounted: true });
+  assert.deepEqual(healthy, { action: "none", mismatchFrames: 0, remounted: false });
+});
+
+test("DOM widget replacement preserves node dimensions and external editor state", async () => {
+  const { replaceDomWidgetPreservingNode } = await loadHelperModule();
+  const currentWidget = { name: "burve_crop_mask_editor" };
+  const nextWidget = { name: "burve_crop_mask_editor" };
+  const editorState = {
+    crop: { x: 10, y: 20, width: 300, height: 400 },
+    viewport: { zoom: 1.75, pan_x: 8, pan_y: -3 },
+    strokes: [{ mode: "paint", points: [[1, 2]] }],
+  };
+  const serializedBefore = JSON.stringify(editorState);
+  let restoredHooks = false;
+  const node = {
+    size: new Float32Array([644, 1122]),
+    widgets: [currentWidget],
+    removeWidget(widget) {
+      this.widgets.splice(this.widgets.indexOf(widget), 1);
+      this.size = [320, 500];
+    },
+    setSize(size) {
+      this.size = [...size];
+    },
+  };
+
+  const result = replaceDomWidgetPreservingNode({
+    node,
+    currentWidget,
+    beforeRemove() {
+      restoredHooks = true;
+    },
+    createWidget() {
+      node.widgets.push(nextWidget);
+      return nextWidget;
+    },
+  });
+
+  assert.equal(result, nextWidget);
+  assert.equal(restoredHooks, true);
+  assert.deepEqual(node.size, [644, 1122]);
+  assert.deepEqual(node.widgets, [nextWidget]);
+  assert.equal(node._widgetSlotsDirty, true);
+  assert.equal(JSON.stringify(editorState), serializedBefore);
+});
+
+test("crop-mask lifecycle never mutates preview widgets from background drawing", async () => {
+  const frontendPath = path.join(__dirname, "..", "web", "js", "burve_crop_mask_load.js");
+  const helperPath = path.join(__dirname, "..", "web", "js", "burve_crop_mask_load_helpers.js");
+  const [frontendSource, helperSource] = await Promise.all([
+    fs.readFile(frontendPath, "utf8"),
+    fs.readFile(helperPath, "utf8"),
+  ]);
+
+  assert.doesNotMatch(frontendSource, /wrap\("onDrawBackground"/);
+  assert.doesNotMatch(frontendSource, /scheduleNativeImageUiSuppression/);
+  assert.doesNotMatch(helperSource, /node\.widgets\.splice/);
+  assert.doesNotMatch(helperSource, /node\.imgs\s*=/);
 });
 
 test("isClientPointInsideRect returns true for center and boundary points", async () => {

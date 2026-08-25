@@ -1,2 +1,3 @@
-google-genai>=1.68.0,<2
+google-genai>=2.13.0,<3
 pillow
+pillow-heif>=0.18.0,<2

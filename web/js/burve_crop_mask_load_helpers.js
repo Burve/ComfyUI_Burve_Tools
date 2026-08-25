@@ -10,12 +10,206 @@ export function buildImageWidgetValue(uploadResult) {
   return subfolder ? `${subfolder}/${name}` : name;
 }
 
-export function computeCropMaskWidgetLayout({ widgetHeight, chromeHeight, minCanvasHeight }) {
-  const nextWidgetHeight = Math.max(widgetHeight, Math.ceil(chromeHeight + minCanvasHeight));
+export function computeCropMaskWidgetLayout({ availableHeight, chromeHeight, minCanvasHeight }) {
+  const resolvedChromeHeight = Math.max(0, Math.ceil(Number(chromeHeight) || 0));
+  const resolvedMinCanvasHeight = Math.max(1, Math.ceil(Number(minCanvasHeight) || 0));
+  const minWidgetHeight = resolvedChromeHeight + resolvedMinCanvasHeight;
+  const requestedHeight = Math.floor(Number(availableHeight));
+  const widgetHeight = Math.max(
+    minWidgetHeight,
+    Number.isFinite(requestedHeight) ? requestedHeight : minWidgetHeight
+  );
   return {
-    widgetHeight: nextWidgetHeight,
-    canvasHeight: Math.max(1, Math.floor(nextWidgetHeight - chromeHeight)),
+    minWidgetHeight,
+    widgetHeight,
+    canvasHeight: Math.max(resolvedMinCanvasHeight, widgetHeight - resolvedChromeHeight),
   };
+}
+
+const CROP_MASK_NATIVE_WIDGET_NAMES = new Set([
+  "image",
+  "upload",
+  "refresh",
+  "Auto-refresh after generation",
+]);
+
+export const NATIVE_IMAGE_PREVIEW_WIDGET_NAME = "$$canvas-image-preview";
+const NATIVE_IMAGE_PREVIEW_GUARD_MARKER = "__burveNativeImagePreviewGuard";
+const HIDDEN_WIDGET_SIZE = () => [0, -4];
+
+export function createNativeImagePreviewGuard() {
+  return {
+    name: NATIVE_IMAGE_PREVIEW_WIDGET_NAME,
+    type: "BURVE_NATIVE_IMAGE_PREVIEW_GUARD",
+    value: "",
+    hidden: true,
+    serialize: false,
+    options: { serialize: false, canvasOnly: true },
+    [NATIVE_IMAGE_PREVIEW_GUARD_MARKER]: true,
+    computeSize: HIDDEN_WIDGET_SIZE,
+    computeLayoutSize: () => ({ minHeight: 0, maxHeight: 0, minWidth: 0, maxWidth: 0 }),
+    draw: () => {},
+    drawWidget: () => {},
+    onClick: () => {},
+  };
+}
+
+export function isNativeImagePreviewGuard(widget) {
+  return Boolean(widget?.[NATIVE_IMAGE_PREVIEW_GUARD_MARKER]);
+}
+
+export function ensureNativeImagePreviewGuard(node) {
+  if (!node || !Array.isArray(node.widgets)) {
+    return { guard: null, added: false, removedCount: 0 };
+  }
+
+  let guard = node.widgets.find(isNativeImagePreviewGuard) ?? null;
+  let removedCount = 0;
+  const stalePreviews = node.widgets.filter(
+    (widget) => widget?.name === NATIVE_IMAGE_PREVIEW_WIDGET_NAME && widget !== guard
+  );
+  for (const previewWidget of stalePreviews) {
+    if (typeof node.removeWidget !== "function") {
+      continue;
+    }
+    node.removeWidget(previewWidget);
+    removedCount += 1;
+  }
+
+  if (guard || typeof node.addCustomWidget !== "function") {
+    return { guard, added: false, removedCount };
+  }
+
+  guard = node.addCustomWidget(createNativeImagePreviewGuard());
+  return { guard, added: true, removedCount };
+}
+
+export function removeNativeImagePreviewGuard(node, guard) {
+  if (!node || !guard || !isNativeImagePreviewGuard(guard) || !node.widgets?.includes?.(guard)) {
+    return false;
+  }
+  if (typeof node.removeWidget !== "function") {
+    return false;
+  }
+  node.removeWidget(guard);
+  return true;
+}
+
+export function hideCropMaskNativeWidgets(node) {
+  let hiddenCount = 0;
+  for (const widget of node?.widgets ?? []) {
+    if (!CROP_MASK_NATIVE_WIDGET_NAMES.has(widget?.name)) {
+      continue;
+    }
+    widget.hidden = true;
+    widget.computeSize = HIDDEN_WIDGET_SIZE;
+    hiddenCount += 1;
+  }
+  return hiddenCount;
+}
+
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+export function evaluateDomWidgetGeometry({
+  nodeWidth,
+  widgetWidth,
+  widgetHeight,
+  margin,
+  hostClientWidth,
+  hostClientHeight,
+  hostRectWidth,
+  hostRectHeight,
+  graphScale,
+  logicalTolerance = 2,
+  scaleTolerance = 0.025,
+}) {
+  const resolvedNodeWidth = finiteNumber(nodeWidth);
+  const resolvedWidgetWidth = finiteNumber(widgetWidth);
+  const resolvedWidgetHeight = finiteNumber(widgetHeight);
+  const resolvedMargin = Math.max(0, finiteNumber(margin) ?? 0);
+  const logicalWidth = finiteNumber(hostClientWidth);
+  const logicalHeight = finiteNumber(hostClientHeight);
+  const renderedWidth = finiteNumber(hostRectWidth);
+  const renderedHeight = finiteNumber(hostRectHeight);
+  const expectedScale = finiteNumber(graphScale);
+  const expectedWidth = (resolvedWidgetWidth ?? resolvedNodeWidth ?? 0) - resolvedMargin * 2;
+  const expectedHeight = (resolvedWidgetHeight ?? 0) - resolvedMargin * 2;
+
+  if (
+    !(expectedWidth > 0) ||
+    !(expectedHeight > 0) ||
+    !(logicalWidth > 0) ||
+    !(logicalHeight > 0) ||
+    !(renderedWidth > 0) ||
+    !(renderedHeight > 0)
+  ) {
+    return { status: "transient", healthy: false };
+  }
+
+  const actualScaleX = renderedWidth / logicalWidth;
+  const actualScaleY = renderedHeight / logicalHeight;
+  const widthMatches = Math.abs(logicalWidth - expectedWidth) <= logicalTolerance;
+  const heightMatches = Math.abs(logicalHeight - expectedHeight) <= logicalTolerance;
+  const scaleMatches =
+    !(expectedScale > 0) ||
+    (Math.abs(actualScaleX - expectedScale) <= scaleTolerance &&
+      Math.abs(actualScaleY - expectedScale) <= scaleTolerance);
+  const healthy = widthMatches && heightMatches && scaleMatches;
+
+  return {
+    status: healthy ? "healthy" : "mismatch",
+    healthy,
+    expectedWidth,
+    expectedHeight,
+    logicalWidth,
+    logicalHeight,
+    actualScaleX,
+    actualScaleY,
+    expectedScale,
+    widthMatches,
+    heightMatches,
+    scaleMatches,
+  };
+}
+
+export function nextDomWidgetRecoveryState({ geometryStatus, mismatchFrames = 0, remounted = false }) {
+  if (geometryStatus === "healthy") {
+    return { action: "none", mismatchFrames: 0, remounted: false };
+  }
+  if (geometryStatus !== "mismatch") {
+    return { action: "none", mismatchFrames, remounted };
+  }
+
+  const nextMismatchFrames = mismatchFrames + 1;
+  if (nextMismatchFrames === 1) {
+    return { action: "reflow", mismatchFrames: nextMismatchFrames, remounted };
+  }
+  if (!remounted) {
+    return { action: "remount", mismatchFrames: nextMismatchFrames, remounted: true };
+  }
+  return { action: "none", mismatchFrames: nextMismatchFrames, remounted };
+}
+
+export function replaceDomWidgetPreservingNode({ node, currentWidget, beforeRemove, createWidget }) {
+  if (!node || !currentWidget || typeof node.removeWidget !== "function" || typeof createWidget !== "function") {
+    throw new TypeError("DOM widget replacement requires a node, current widget, and supported widget APIs");
+  }
+  const savedSize = node.size?.length >= 2 ? [Number(node.size[0]), Number(node.size[1])] : null;
+  beforeRemove?.(currentWidget);
+  node.removeWidget(currentWidget);
+  const nextWidget = createWidget();
+  if (savedSize) {
+    if (typeof node.setSize === "function") {
+      node.setSize(savedSize);
+    } else {
+      node.size = savedSize;
+    }
+  }
+  node._widgetSlotsDirty = true;
+  return nextWidget;
 }
 
 export function isClientPointInsideRect({ clientX, clientY, rect }) {

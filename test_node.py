@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import io
 import json
 import unittest
 import os
@@ -112,8 +114,30 @@ def install_test_stubs():
             self.kwargs = kwargs
             self.models = self
 
+        @property
+        def interactions(self):
+            return self
+
         def generate_content(self, *args, **kwargs):
             raise NotImplementedError("Dummy client should be mocked in tests.")
+
+        def create(self, *args, **kwargs):
+            raise NotImplementedError("Dummy interactions client should be mocked in tests.")
+
+        def get(self, *args, **kwargs):
+            return DummyConfig(name=kwargs.get("model", ""))
+
+        def list(self, *args, **kwargs):
+            return []
+
+    class DummyPart:
+        @staticmethod
+        def from_bytes(**kwargs):
+            return DummyConfig(**kwargs)
+
+        @staticmethod
+        def from_uri(**kwargs):
+            return DummyConfig(**kwargs)
 
     class DummyThinkingLevel:
         LOW = "LOW"
@@ -133,7 +157,7 @@ def install_test_stubs():
             self.status = ""
             super().__init__(str(response_json))
 
-    genai_stub.__version__ = "1.68.0"
+    genai_stub.__version__ = "2.13.0"
     genai_stub.Client = DummyClient
     genai_stub.types = pytypes.SimpleNamespace(
         ImageConfig=DummyConfig,
@@ -147,6 +171,7 @@ def install_test_stubs():
         ImageSearch=DummyConfig,
         ThinkingLevel=DummyThinkingLevel,
         ProminentPeople=DummyProminentPeople,
+        Part=DummyPart,
     )
     genai_errors_stub = pytypes.ModuleType("google.genai.errors")
     genai_errors_stub.APIError = DummyAPIError
@@ -234,6 +259,46 @@ def install_test_stubs():
                     self.io_type = "COMBO"
                     self.options = list(options or [])
 
+        class StringType(make_type("STRING")):
+            class Input(StubInput):
+                def __init__(
+                    self,
+                    id,
+                    display_name=None,
+                    optional=False,
+                    tooltip=None,
+                    lazy=None,
+                    multiline=False,
+                    placeholder=None,
+                    default=None,
+                    dynamic_prompts=None,
+                    socketless=None,
+                    force_input=None,
+                    extra_dict=None,
+                    raw_link=None,
+                    advanced=None,
+                ):
+                    kwargs = {
+                        "display_name": display_name,
+                        "optional": optional,
+                        "tooltip": tooltip,
+                        "lazy": lazy,
+                        "multiline": multiline,
+                        "placeholder": placeholder,
+                        "default": default,
+                        "dynamic_prompts": dynamic_prompts,
+                        "socketless": socketless,
+                        "force_input": force_input,
+                        "extra_dict": extra_dict,
+                        "raw_link": raw_link,
+                        "advanced": advanced,
+                    }
+                    super().__init__(
+                        id,
+                        **{key: value for key, value in kwargs.items() if value is not None},
+                    )
+                    self.io_type = "STRING"
+
         class DynamicComboType:
             class Option:
                 def __init__(self, key, inputs):
@@ -268,6 +333,9 @@ def install_test_stubs():
 
                 for item in self.inputs:
                     meta = {key: value for key, value in item.kwargs.items() if key != "optional"}
+                    extra_dict = meta.pop("extra_dict", None)
+                    if isinstance(extra_dict, dict):
+                        meta.update(extra_dict)
                     if getattr(item, "io_type", None) == "COMBO":
                         io_definition = list(getattr(item, "options", []))
                     else:
@@ -323,7 +391,7 @@ def install_test_stubs():
             NodeOutput=NodeOutput,
             RemoteOptions=RemoteOptions,
             Schema=Schema,
-            String=make_type("STRING"),
+            String=StringType,
             UploadType=UploadType,
         )
 
@@ -961,7 +1029,7 @@ class SharedImageGenResolverTestMixin:
         pipe_without_refs = dict(self.character_pipe, reference_images=None)
         with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
             with mock.patch.object(self.node, "_build_client", return_value=FakeClient("test-key")):
-                image, thinking_image, thinking_process, system_messages, generated_image_pipe = self.node.generate_image(
+                image, thinking_image, thinking_process, system_messages, generated_image_pipe, *_ = self.node.generate_image(
                     prompt="direct prompt",
                     model="gemini-2.5-flash-image",
                     seed=123,
@@ -972,7 +1040,7 @@ class SharedImageGenResolverTestMixin:
 
         self.assertEqual(FakeClient.last_call["contents"][0], "pipe prompt")
         self.assertIn(
-            "character_pipe is connected; ignoring direct prompt, system_instructions, and reference_images inputs.",
+            "character_pipe is connected; ignoring direct prompt, system_instructions, and reference image inputs.",
             system_messages,
         )
         self.assertIn("Planner summary:\nGender: female", system_messages)
@@ -1007,7 +1075,7 @@ class SharedImageGenResolverTestMixin:
         pipe_without_refs = dict(self.character_pipe, reference_images=None)
         with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
             with mock.patch.object(self.node, "_build_client", return_value=FakeClient("test-key")):
-                _, _, _, system_messages, _ = self.node.generate_image(
+                _, _, _, system_messages, _, *_ = self.node.generate_image(
                     prompt="",
                     model="gemini-2.5-flash-image",
                     seed=123,
@@ -1068,7 +1136,7 @@ class SharedImageGenResolverTestMixin:
             with mock.patch.object(self.node, "_build_client") as mock_build_client:
                 with self.assertRaisesRegex(
                     gemini_service_module.GeminiAspectRatioCompatibilityError,
-                    "Selected model gemini-3-pro-image-preview does not support aspect_ratio '4:1'",
+                    "Selected model gemini-3-pro-image does not support aspect_ratio '4:1'",
                 ):
                     self.node.generate_image(
                         prompt="prompt",
@@ -1102,7 +1170,7 @@ class SharedImageGenResolverTestMixin:
 
         with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
             with mock.patch.object(self.node, "_build_client", return_value=fake_client):
-                image, thinking_image, thinking_process, system_messages, generated_image_pipe = self.node.generate_image(
+                image, thinking_image, thinking_process, system_messages, generated_image_pipe, *_ = self.node.generate_image(
                     prompt="prompt",
                     model="gemini-2.5-flash-image",
                     seed=123,
@@ -1143,7 +1211,7 @@ class SharedImageGenResolverTestMixin:
 
         with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
             with mock.patch.object(self.node, "_build_client", return_value=fake_client):
-                _, _, thinking_process, system_messages, _ = self.node.generate_image(
+                _, _, thinking_process, system_messages, _, *_ = self.node.generate_image(
                     prompt="prompt",
                     model={
                         "model": "gemini-3-pro-image-preview",
@@ -1183,6 +1251,7 @@ class SharedImageGenResolverTestMixin:
         fake_image.convert.return_value = fake_image
         fake_array = mock.Mock()
         fake_array.astype.return_value = fake_array
+        fake_array.__truediv__ = mock.Mock(return_value=fake_array)
         fake_array.ndim = 3
         tensor = torch.ones((2, 2, 3))
 
@@ -1191,7 +1260,7 @@ class SharedImageGenResolverTestMixin:
                 with mock.patch.object(gemini_service_module.Image, "open", return_value=fake_image):
                     with mock.patch.object(gemini_service_module.np, "array", return_value=fake_array, create=True):
                         with mock.patch.object(gemini_service_module.torch, "from_numpy", return_value=tensor):
-                            image, thinking_image, _, system_messages, generated_image_pipe = self.node.generate_image(
+                            image, thinking_image, _, system_messages, generated_image_pipe, *_ = self.node.generate_image(
                                 prompt="prompt",
                                 model={
                                     "model": "gemini-3-pro-image-preview",
@@ -1209,7 +1278,8 @@ class SharedImageGenResolverTestMixin:
         self.assertTrue(torch.is_tensor(thinking_image))
         self.assertIsNone(getattr(fake_client.last_call["config"], "thinking_config", None))
         self.assertNotIn("No non-thinking image generated.", system_messages)
-        self.assertEqual(generated_image_pipe["items"], [])
+        self.assertEqual(len(generated_image_pipe["items"]), 1)
+        self.assertTrue(generated_image_pipe["items"][0]["is_thought"])
 
     def test_generate_image_returns_timeout_error_for_stalled_request(self):
         class FakeClient:
@@ -1228,7 +1298,7 @@ class SharedImageGenResolverTestMixin:
             with mock.patch.object(self.node, "_build_client", return_value=fake_client):
                 with mock.patch.object(nodes_module.time, "monotonic", side_effect=lambda: next(monotonic_values)):
                     with mock.patch.object(nodes_module.time, "sleep", return_value=None):
-                        image, thinking_image, _, system_messages, _ = self.node.generate_image(
+                        image, thinking_image, _, system_messages, _, *_ = self.node.generate_image(
                             prompt="prompt",
                             model="gemini-2.5-flash-image",
                             seed=123,
@@ -1266,7 +1336,7 @@ class SharedImageGenResolverTestMixin:
                 with mock.patch.object(nodes_module.time, "monotonic", side_effect=lambda: next(monotonic_values)):
                     with mock.patch.object(nodes_module.time, "sleep", return_value=None):
                         with mock.patch.object(nodes_module.random, "uniform", return_value=1.0):
-                            _, _, thinking_process, system_messages, _ = self.node.generate_image(
+                            _, _, thinking_process, system_messages, _, *_ = self.node.generate_image(
                                 prompt="prompt",
                                 model="gemini-2.5-flash-image",
                                 seed=123,
@@ -1296,7 +1366,7 @@ class SharedImageGenResolverTestMixin:
         with mock.patch.object(self.node, "_get_provider_auth_error", return_value=None):
             with mock.patch.object(self.node, "_build_client", return_value=fake_client):
                 with mock.patch.object(nodes_module.time, "monotonic", side_effect=lambda: next(monotonic_values)):
-                    image, thinking_image, _, system_messages, _ = self.node.generate_image(
+                    image, thinking_image, _, system_messages, _, *_ = self.node.generate_image(
                         prompt="prompt",
                         model="gemini-2.5-flash-image",
                         seed=123,
@@ -1328,7 +1398,7 @@ class SharedImageGenResolverTestMixin:
                 with mock.patch.object(nodes_module.time, "monotonic", side_effect=lambda: next(monotonic_values)):
                     with mock.patch.object(nodes_module.time, "sleep", return_value=None):
                         with mock.patch.object(nodes_module.random, "uniform", return_value=1.0):
-                            _, _, _, system_messages, _ = self.node.generate_image(
+                            _, _, _, system_messages, _, *_ = self.node.generate_image(
                                 prompt="prompt",
                                 model="gemini-2.5-flash-image",
                                 seed=123,
@@ -1356,7 +1426,7 @@ class SharedImageGenResolverTestMixin:
             with mock.patch.object(self.node, "_build_client", return_value=fake_client):
                 with mock.patch.object(nodes_module.time, "monotonic", side_effect=lambda: next(monotonic_values)):
                     with mock.patch.object(nodes_module.time, "sleep", return_value=None):
-                        _, _, _, system_messages, _ = self.node.generate_image(
+                        _, _, _, system_messages, _, *_ = self.node.generate_image(
                             prompt="direct prompt",
                             model="gemini-2.5-flash-image",
                             seed=123,
@@ -1368,7 +1438,7 @@ class SharedImageGenResolverTestMixin:
                         )
 
         self.assertIn(
-            "character_pipe is connected; ignoring direct prompt, system_instructions, and reference_images inputs.",
+            "character_pipe is connected; ignoring direct prompt, system_instructions, and reference image inputs.",
             system_messages,
         )
         self.assertIn("Planner summary:\nGender: female", system_messages)
@@ -1393,6 +1463,7 @@ class GeminiImageServiceRequestBuilderTests(unittest.TestCase):
                 "aspect_ratio": "16:9",
             },
             seed=123,
+            grounding_renderer=gemini_service_module.GROUNDING_RENDERER_VERSION,
         )
 
         self.assertEqual(request.model_id, "gemini-2.5-flash-image")
@@ -1434,6 +1505,7 @@ class GeminiImageServiceRequestBuilderTests(unittest.TestCase):
                 "prominent_people": "block",
             },
             seed=123,
+            grounding_renderer=gemini_service_module.GROUNDING_RENDERER_VERSION,
         )
 
         self.assertEqual(request.config.image_config.aspect_ratio, "4:1")
@@ -1467,7 +1539,7 @@ class GeminiImageServiceRequestBuilderTests(unittest.TestCase):
     def test_aspect_ratio_override_rejects_unsupported_ratio_for_selected_model(self):
         with self.assertRaisesRegex(
             gemini_service_module.GeminiAspectRatioCompatibilityError,
-            "Selected model gemini-3-pro-image-preview does not support aspect_ratio '4:1'",
+            "Selected model gemini-3-pro-image does not support aspect_ratio '4:1'",
         ):
             gemini_service_module.prepare_generate_content_request(
                 provider_id="vertex",
@@ -1482,7 +1554,7 @@ class GeminiImageServiceRequestBuilderTests(unittest.TestCase):
                 seed=123,
             )
 
-    def test_reference_image_packing_limits_to_fourteen_images(self):
+    def test_reference_image_packing_rejects_more_than_fourteen_images(self):
         class FakeImageArray:
             def __mul__(self, value):
                 return self
@@ -1506,13 +1578,11 @@ class GeminiImageServiceRequestBuilderTests(unittest.TestCase):
 
         with mock.patch.object(gemini_service_module.torch, "Tensor", FakeTensor):
             with mock.patch.object(gemini_service_module.Image, "fromarray", side_effect=lambda value: value):
-                contents = gemini_service_module.build_contents(
-                    prompt="prompt",
-                    reference_images=[FakeTensor(20)],
-                )
-
-        self.assertEqual(contents[0], "prompt")
-        self.assertEqual(len(contents), 15)
+                with self.assertRaisesRegex(ValueError, "at most 14 reference image"):
+                    gemini_service_module.build_contents(
+                        prompt="prompt",
+                        reference_images=[FakeTensor(20)],
+                    )
 
 
 class GeminiImageResponseArtifactTests(unittest.TestCase):
@@ -1559,7 +1629,7 @@ class GeminiImageResponseArtifactTests(unittest.TestCase):
         self.assertEqual(parsed.image_artifacts[0].raw_bytes, b"jpeg-bytes")
         self.assertEqual(parsed.image_artifacts[0].source, "response_bytes")
 
-    def test_parse_response_ignores_thinking_images_in_artifacts(self):
+    def test_parse_response_preserves_thinking_images_as_tagged_artifacts(self):
         fake_image = mock.Mock()
         fake_image.convert.return_value = fake_image
 
@@ -1594,7 +1664,8 @@ class GeminiImageResponseArtifactTests(unittest.TestCase):
                 with mock.patch.object(gemini_service_module.torch, "from_numpy", return_value=tensor):
                     parsed = gemini_service_module.parse_generate_content_response(response)
 
-        self.assertEqual(parsed.image_artifacts, ())
+        self.assertEqual(len(parsed.image_artifacts), 1)
+        self.assertTrue(parsed.image_artifacts[0].is_thought)
 
     def test_parse_response_deduplicates_image_artifacts(self):
         fake_image = mock.Mock()
@@ -1688,7 +1759,7 @@ class GeminiImageOutputDefaultTests(unittest.TestCase):
                 with mock.patch.object(gemini_service_module.Image, "open", return_value=fake_image):
                     with mock.patch.object(gemini_service_module.np, "array", return_value=fake_array, create=True):
                         with mock.patch.object(gemini_service_module.torch, "from_numpy", return_value=tensor):
-                            _, _, thinking_process, system_messages, generated_image_pipe = node.generate_image(
+                            _, _, thinking_process, system_messages, generated_image_pipe, *_ = node.generate_image(
                                 prompt="prompt",
                                 model={
                                     "model": "gemini-2.5-flash-image",
@@ -1698,7 +1769,8 @@ class GeminiImageOutputDefaultTests(unittest.TestCase):
                             )
 
         self.assertEqual(thinking_process, gemini_service_module.THINKING_PROCESS_DEFAULT)
-        self.assertEqual(system_messages, gemini_service_module.SYSTEM_MESSAGES_DEFAULT)
+        self.assertIn("Lifecycle warning: gemini-2.5-flash-image is legacy", system_messages)
+        self.assertIn("Request routing: provider=aistudio, api_mode=generate_content.", system_messages)
         self.assertEqual(generated_image_pipe["kind"], nodes_module.GENERATED_IMAGE_PIPE_KIND)
 
 
@@ -1757,7 +1829,7 @@ class GeneratedImagePipeTests(unittest.TestCase):
                 with mock.patch.object(gemini_service_module.Image, "open", return_value=fake_image):
                     with mock.patch.object(gemini_service_module.np, "array", return_value=fake_array, create=True):
                         with mock.patch.object(gemini_service_module.torch, "from_numpy", return_value=tensor):
-                            _, _, _, _, generated_image_pipe = node.generate_image(
+                            _, _, _, _, generated_image_pipe, *_ = node.generate_image(
                                 prompt="prompt",
                                 model={
                                     "model": "gemini-3.1-flash-image-preview",
@@ -1778,7 +1850,7 @@ class GeneratedImagePipeTests(unittest.TestCase):
         self.assertEqual(generated_image_pipe["items"][0]["extension"], "jpg")
         self.assertEqual(generated_image_pipe["items"][0]["raw_bytes"], b"vertex-jpeg")
 
-    def test_aistudio_generate_image_emits_pipe_without_raw_bytes(self):
+    def test_aistudio_generate_image_preserves_exact_raw_bytes(self):
         node = BurveGoogleImageGen()
         response = self._make_image_response(b"aistudio-image", "image/webp")
         fake_image, fake_array, tensor = self._mock_parse_image()
@@ -1788,7 +1860,7 @@ class GeneratedImagePipeTests(unittest.TestCase):
                 with mock.patch.object(gemini_service_module.Image, "open", return_value=fake_image):
                     with mock.patch.object(gemini_service_module.np, "array", return_value=fake_array, create=True):
                         with mock.patch.object(gemini_service_module.torch, "from_numpy", return_value=tensor):
-                            _, _, _, system_messages, generated_image_pipe = node.generate_image(
+                            _, _, _, system_messages, generated_image_pipe, *_ = node.generate_image(
                                 prompt="prompt",
                                 model={
                                     "model": "gemini-3.1-flash-image-preview",
@@ -1803,10 +1875,12 @@ class GeneratedImagePipeTests(unittest.TestCase):
                                 seed=123,
                             )
 
-        self.assertIn("output_mime_type is not supported", system_messages)
+        self.assertIn("output_mime_type is ignored", system_messages)
         self.assertEqual(generated_image_pipe["provider_id"], "aistudio")
-        self.assertIsNone(generated_image_pipe["items"][0]["raw_bytes"])
-        self.assertIn("Exact passthrough bytes are unavailable", generated_image_pipe["notes"])
+        self.assertEqual(
+            generated_image_pipe["items"][0]["raw_bytes"],
+            b"aistudio-image",
+        )
 
 
 class BurveSaveGeneratedImageTests(unittest.TestCase):
@@ -1887,6 +1961,46 @@ class BurveSaveGeneratedImageTests(unittest.TestCase):
                     self.assertEqual(handle.read(), b"webp-file")
                 self.assertEqual(output["ui"]["images"][0]["filename"], os.path.basename(saved_path))
 
+    def test_save_generated_image_preserves_all_supported_mime_extensions(self):
+        node = BurveSaveGeneratedImage()
+        image = torch.ones((1, 2, 2, 3))
+        cases = {
+            "image/png": "png",
+            "image/jpeg": "jpg",
+            "image/webp": "webp",
+            "image/heic": "heic",
+            "image/heif": "heif",
+        }
+        for mime_type, extension in cases.items():
+            with self.subTest(mime_type=mime_type):
+                raw_bytes = f"{mime_type}-bytes".encode("ascii")
+                pipe = self._make_pipe(
+                    [
+                        {
+                            "mime_type": mime_type,
+                            "extension": extension,
+                            "raw_bytes": raw_bytes,
+                            "sha256": "hash",
+                            "source": "response_bytes",
+                        }
+                    ]
+                )
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    with mock.patch.object(
+                        node,
+                        "_get_output_directory",
+                        return_value=temp_dir,
+                    ):
+                        output = node.save(
+                            image=image,
+                            filename_prefix="mime",
+                            generated_image_pipe=pipe,
+                        )
+                        saved_path = output["result"][0].splitlines()[0]
+                        self.assertTrue(saved_path.endswith(f".{extension}"))
+                        with open(saved_path, "rb") as handle:
+                            self.assertEqual(handle.read(), raw_bytes)
+
     def test_save_generated_image_falls_back_when_raw_bytes_are_missing(self):
         node = BurveSaveGeneratedImage()
         image = torch.ones((1, 2, 2, 3))
@@ -1911,7 +2025,7 @@ class BurveSaveGeneratedImageTests(unittest.TestCase):
         self.assertTrue(saved_files.splitlines()[0].endswith(".png"))
         self.assertEqual(output["ui"]["images"][0]["type"], "output")
 
-    def test_save_generated_image_falls_back_for_batch_mismatch(self):
+    def test_save_generated_image_preserves_raw_items_for_batch_mismatch(self):
         node = BurveSaveGeneratedImage()
         image = torch.ones((2, 2, 2, 3))
         pipe = self._make_pipe(
@@ -1931,8 +2045,55 @@ class BurveSaveGeneratedImageTests(unittest.TestCase):
                 output = node.save(image=image, filename_prefix="mismatch", generated_image_pipe=pipe)
                 saved_files = output["result"][0]
 
-        self.assertIn("item count did not match", saved_files)
-        self.assertEqual(len([line for line in saved_files.splitlines() if line.endswith(".png")]), 2)
+        self.assertIn("non-batched image artifacts", saved_files)
+        self.assertEqual(len([line for line in saved_files.splitlines() if line.endswith(".jpg")]), 1)
+        self.assertEqual(len([line for line in saved_files.splitlines() if line.endswith(".png")]), 1)
+        self.assertEqual(len(output["ui"]["images"]), 2)
+
+    def test_save_generated_image_writes_all_mixed_dimension_raw_artifacts(self):
+        node = BurveSaveGeneratedImage()
+        image = torch.ones((1, 2, 2, 3))
+        pipe = self._make_pipe(
+            [
+                {
+                    "mime_type": "image/png",
+                    "extension": "png",
+                    "raw_bytes": b"small-png",
+                    "sha256": "hash1",
+                    "source": "response_bytes",
+                    "width": 2,
+                    "height": 2,
+                },
+                {
+                    "mime_type": "image/jpeg",
+                    "extension": "jpg",
+                    "raw_bytes": b"large-jpeg",
+                    "sha256": "hash2",
+                    "source": "response_bytes",
+                    "width": 4,
+                    "height": 3,
+                },
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(node, "_get_output_directory", return_value=temp_dir):
+                output = node.save(
+                    image=image,
+                    filename_prefix="mixed-size",
+                    generated_image_pipe=pipe,
+                )
+                saved_files = output["result"][0]
+                saved_paths = [
+                    line
+                    for line in saved_files.splitlines()
+                    if line.endswith((".png", ".jpg"))
+                ]
+                self.assertEqual(len(saved_paths), 2)
+                with open(saved_paths[0], "rb") as handle:
+                    self.assertEqual(handle.read(), b"small-png")
+                with open(saved_paths[1], "rb") as handle:
+                    self.assertEqual(handle.read(), b"large-jpeg")
         self.assertEqual(len(output["ui"]["images"]), 2)
 
     def test_save_generated_image_rejects_invalid_pipe_kind(self):
@@ -1986,6 +2147,29 @@ class BurveSaveGeneratedImageTests(unittest.TestCase):
             {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         )
 
+    def test_save_generated_image_accepts_version_one_pipe(self):
+        node = BurveSaveGeneratedImage()
+        image = torch.ones((1, 2, 2, 3))
+        pipe = self._make_pipe(
+            [
+                {
+                    "mime_type": "image/png",
+                    "raw_bytes": None,
+                    "source": "unavailable",
+                }
+            ]
+        )
+        pipe["version"] = 1
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(node, "_get_output_directory", return_value=temp_dir):
+                output = node.save(
+                    image=image,
+                    filename_prefix="version-one",
+                    generated_image_pipe=pipe,
+                )
+        self.assertIn("saved PNG fallback", output["result"][0])
+
 
 class BurveV3ExtensionTests(unittest.TestCase):
     def _get_node_map(self):
@@ -1996,6 +2180,7 @@ class BurveV3ExtensionTests(unittest.TestCase):
     def test_package_entrypoint_returns_extension_with_stable_node_ids(self):
         node_map = self._get_node_map()
 
+        self.assertEqual(len(node_map), 19)
         self.assertIn("BurveGoogleImageGen", node_map)
         self.assertIn("BurveVertexImageGen", node_map)
         self.assertIn("BurveSaveGeneratedImage", node_map)
@@ -2003,6 +2188,34 @@ class BurveV3ExtensionTests(unittest.TestCase):
         self.assertIn("BurveCharacterPlanner", node_map)
         self.assertIn("BurveCropMaskLoad", node_map)
         self.assertIn("BurveCropMaskApply", node_map)
+        self.assertIn("BurveGeminiReferencePack", node_map)
+        self.assertIn("BurveGeminiInputFiles", node_map)
+        self.assertIn("BurveListGoogleImageModels", node_map)
+
+    def test_gemini_input_files_schema_preserves_string_upload_metadata(self):
+        node_map = self._get_node_map()
+        schema = node_map["BurveGeminiInputFiles"].define_schema()
+
+        self.assertEqual(
+            [item.id for item in schema.inputs],
+            [f"file{index}" for index in range(1, 9)],
+        )
+        for item in schema.inputs:
+            self.assertEqual(item.io_type, "STRING")
+            self.assertTrue(item.optional)
+            self.assertNotIn("upload", item.kwargs)
+            self.assertEqual(item.extra_dict, {"file_upload": True})
+
+        v1_info = schema.get_v1_info(include_hidden=False)
+        self.assertEqual(v1_info["input_order"]["required"], [])
+        self.assertEqual(
+            v1_info["input_order"]["optional"],
+            [f"file{index}" for index in range(1, 9)],
+        )
+        for spec in v1_info["input"]["optional"].values():
+            self.assertEqual(spec[0], "STRING")
+            self.assertTrue(spec[1]["file_upload"])
+            self.assertNotIn("extra_dict", spec[1])
 
     def test_save_generated_image_schema_includes_hidden_prompt_metadata(self):
         node_map = self._get_node_map()
@@ -2038,8 +2251,9 @@ class BurveV3ExtensionTests(unittest.TestCase):
 
         for node_id in ("BurveGoogleImageGen", "BurveVertexImageGen"):
             schema = node_map[node_id].define_schema()
+            input_ids = [item.id for item in schema.inputs]
             self.assertEqual(
-                [item.id for item in schema.inputs],
+                input_ids[:9],
                 [
                     "prompt",
                     "model",
@@ -2052,11 +2266,36 @@ class BurveV3ExtensionTests(unittest.TestCase):
                     "retry_attempts",
                 ],
             )
+            for appended_input in (
+                "api_mode",
+                "response_mode",
+                "conversation_mode",
+                "previous_interaction",
+                "reference_pack",
+                "input_files",
+                "video",
+                "video_url",
+                "temperature",
+                "top_p",
+                "grounding_renderer",
+            ):
+                self.assertIn(appended_input, input_ids)
+            if node_id == "BurveVertexImageGen":
+                self.assertEqual(
+                    input_ids[-5:],
+                    [
+                        "vertex_location_mode",
+                        "vertex_output_mime_type",
+                        "output_compression_quality",
+                        "person_generation",
+                        "prominent_people",
+                    ],
+                )
 
             v1_info = schema.get_v1_info(include_hidden=False)
             self.assertEqual(v1_info["input_order"]["required"], ["prompt", "model", "seed"])
             self.assertEqual(
-                v1_info["input_order"]["optional"],
+                v1_info["input_order"]["optional"][:6],
                 [
                     "system_instructions",
                     "reference_images",
@@ -2080,9 +2319,20 @@ class BurveV3ExtensionTests(unittest.TestCase):
             schema = node_map[node_id].define_schema()
             self.assertEqual(
                 [item.id for item in schema.outputs],
-                ["image", "thinking_image", "thinking_process", "system_messages", "generated_image_pipe"],
+                [
+                    "image",
+                    "thinking_image",
+                    "thinking_process",
+                    "system_messages",
+                    "generated_image_pipe",
+                    "response_text",
+                    "grounding_metadata_json",
+                    "interleaved_content",
+                    "interaction_pipe",
+                ],
             )
-            self.assertEqual(schema.outputs[-1].io_type, "GENERATED_IMAGE_PIPE")
+            self.assertEqual(schema.outputs[4].io_type, "GENERATED_IMAGE_PIPE")
+            self.assertEqual(schema.outputs[-1].io_type, "GEMINI_INTERACTION_PIPE")
 
     def test_dynamic_combo_model_specific_fields_match_specs(self):
         node_map = self._get_node_map()
@@ -2095,11 +2345,11 @@ class BurveV3ExtensionTests(unittest.TestCase):
             ["aspect_ratio"],
         )
         self.assertEqual(
-            [item.id for item in option_map["gemini-3-pro-image-preview"].inputs],
-            ["aspect_ratio", "resolution", "search_mode"],
+            [item.id for item in option_map["gemini-3-pro-image"].inputs],
+            ["aspect_ratio", "resolution", "search_mode", "output_mime_type"],
         )
         self.assertEqual(
-            [item.id for item in option_map["gemini-3.1-flash-image-preview"].inputs],
+            [item.id for item in option_map["gemini-3.1-flash-image"].inputs],
             [
                 "aspect_ratio",
                 "resolution",
@@ -2111,9 +2361,15 @@ class BurveV3ExtensionTests(unittest.TestCase):
             ],
         )
 
-        flash31_fields = {item.id: item for item in option_map["gemini-3.1-flash-image-preview"].inputs}
+        self.assertEqual(
+            [item.id for item in option_map["gemini-3.1-flash-lite-image"].inputs],
+            ["aspect_ratio", "resolution", "thinking_level", "include_thoughts"],
+        )
+        flash31_fields = {item.id: item for item in option_map["gemini-3.1-flash-image"].inputs}
         self.assertIn("512", flash31_fields["resolution"].options)
         self.assertIn("web+image", flash31_fields["search_mode"].options)
+        self.assertIn("1:4", flash31_fields["aspect_ratio"].options)
+        self.assertIn("1:8", flash31_fields["aspect_ratio"].options)
         self.assertIn("image/webp", flash31_fields["output_mime_type"].options)
         self.assertIn("block", flash31_fields["prominent_people"].options)
 
@@ -2212,12 +2468,12 @@ class BurveV3ExtensionTests(unittest.TestCase):
         v3_extension_module = importlib.import_module("v3_extension")
 
         with mock.patch.object(sys.modules["comfy_api.latest"].IO, "DynamicCombo", new=pytypes.SimpleNamespace()):
-            with self.assertRaisesRegex(RuntimeError, "DynamicCombo-capable"):
+            with self.assertRaisesRegex(RuntimeError, "DynamicCombo support"):
                 asyncio.run(v3_extension_module.comfy_entrypoint())
 
     def test_dependency_gate_fails_when_google_genai_version_is_too_old(self):
         with mock.patch.object(gemini_service_module.genai, "__version__", "1.52.0"):
-            with self.assertRaisesRegex(RuntimeError, "google-genai>=1.68.0,<2"):
+            with self.assertRaisesRegex(RuntimeError, "google-genai>=2.13.0,<3"):
                 gemini_service_module.ensure_google_genai_compatibility()
 
 
@@ -2882,6 +3138,544 @@ class BurveDebugNodeTests(unittest.TestCase):
         self.assertIn("GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION are still required by this node.", info)
         self.assertIn("does not mean the node is fully configured", info)
         self.assertIn("Missing required config: GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION", info)
+
+
+class GeminiImageModernizationTests(unittest.TestCase):
+    @staticmethod
+    def _png_bytes(width=2, height=2, color=(64, 128, 192)):
+        image = gemini_service_module.Image.new("RGB", (width, height), color)
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+    @staticmethod
+    def _reference_pack(count, role="object"):
+        return {
+            "kind": gemini_service_module.GEMINI_REFERENCE_PIPE_KIND,
+            "version": gemini_service_module.GEMINI_REFERENCE_PIPE_VERSION,
+            "items": [
+                {
+                    "image": torch.ones((1, 2, 2, 3)),
+                    "role": role,
+                    "label": f"reference-{index}",
+                }
+                for index in range(count)
+            ],
+        }
+
+    def test_current_catalog_default_and_retired_aliases(self):
+        self.assertEqual(
+            gemini_service_module.DEFAULT_GEMINI_IMAGE_MODEL,
+            "gemini-3.1-flash-image",
+        )
+        self.assertEqual(
+            list(gemini_service_module.GEMINI_IMAGE_MODEL_SPECS),
+            [
+                "gemini-3.1-flash-image",
+                "gemini-3-pro-image",
+                "gemini-3.1-flash-lite-image",
+                "gemini-2.5-flash-image",
+            ],
+        )
+        flash = gemini_service_module.normalize_model_selection(
+            "gemini-3.1-flash-image-preview"
+        )
+        pro = gemini_service_module.normalize_model_selection(
+            "gemini-3-pro-image-preview"
+        )
+        self.assertEqual(flash.model_id, "gemini-3.1-flash-image")
+        self.assertEqual(pro.model_id, "gemini-3-pro-image")
+        self.assertIn("Model migration", flash.messages[0])
+
+    def test_auto_api_routing_and_default_storage(self):
+        flash = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="prompt",
+            model="gemini-3.1-flash-image",
+            seed=1,
+        )
+        pro = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="prompt",
+            model="gemini-3-pro-image",
+            seed=1,
+        )
+        lite = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="prompt",
+            model="gemini-3.1-flash-lite-image",
+            seed=1,
+        )
+        legacy = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="prompt",
+            model="gemini-2.5-flash-image",
+            seed=1,
+        )
+
+        self.assertEqual(flash.api_mode, "interactions")
+        self.assertEqual(pro.api_mode, "interactions")
+        self.assertFalse(flash.interaction_kwargs["store"])
+        self.assertEqual(lite.api_mode, "generate_content")
+        self.assertEqual(legacy.api_mode, "generate_content")
+
+    def test_vertex_location_routing_and_strict_mode(self):
+        flash = gemini_service_module.prepare_gemini_request(
+            provider_id="vertex",
+            prompt="prompt",
+            model="gemini-3.1-flash-image",
+            seed=1,
+            configured_location="europe-west4",
+        )
+        legacy = gemini_service_module.prepare_gemini_request(
+            provider_id="vertex",
+            prompt="prompt",
+            model="gemini-2.5-flash-image",
+            seed=1,
+            configured_location="europe-west4",
+        )
+        self.assertEqual(flash.effective_location, "global")
+        self.assertEqual(flash.api_mode, "generate_content")
+        self.assertEqual(legacy.effective_location, "europe-west4")
+
+        with self.assertRaisesRegex(ValueError, "global-only"):
+            gemini_service_module.prepare_gemini_request(
+                provider_id="vertex",
+                prompt="prompt",
+                model="gemini-3-pro-image",
+                seed=1,
+                configured_location="europe-west4",
+                vertex_location_mode="configured",
+            )
+
+    def test_output_format_controls_are_only_sent_on_supported_contracts(self):
+        flash_default = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="prompt",
+            model="gemini-3.1-flash-image",
+            seed=1,
+        )
+        image_format = flash_default.interaction_kwargs["response_format"][1]
+        self.assertNotIn("mime_type", image_format)
+
+        flash_jpeg = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="prompt",
+            model={
+                "model": "gemini-3.1-flash-image",
+                "aspect_ratio": "1:1",
+                "resolution": "1K",
+                "search_mode": "off",
+                "thinking_level": "MINIMAL",
+                "include_thoughts": False,
+                "output_mime_type": "image/jpeg",
+                "prominent_people": "allow",
+            },
+            seed=1,
+        )
+        self.assertEqual(
+            flash_jpeg.interaction_kwargs["response_format"][1]["mime_type"],
+            "image/jpeg",
+        )
+
+        vertex = gemini_service_module.prepare_gemini_request(
+            provider_id="vertex",
+            prompt="prompt",
+            model="gemini-3.1-flash-image",
+            seed=1,
+            configured_location="us-central1",
+            vertex_output_mime_type="image/heif",
+        )
+        self.assertEqual(vertex.config.image_config.output_mime_type, "image/heif")
+        with self.assertRaisesRegex(ValueError, "does not support Vertex output type"):
+            gemini_service_module.prepare_gemini_request(
+                provider_id="vertex",
+                prompt="prompt",
+                model="gemini-2.5-flash-image",
+                seed=1,
+                configured_location="us-central1",
+                vertex_output_mime_type="image/heif",
+            )
+
+    def test_stateful_interactions_require_resumable_matching_pipe(self):
+        prior = gemini_service_module.build_interaction_pipe(
+            provider_id="aistudio",
+            model_id="gemini-3.1-flash-image",
+            api_mode="interactions",
+            interaction_id="interaction-1",
+            stored=True,
+        )
+        request = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="edit it",
+            model="gemini-3.1-flash-image",
+            seed=1,
+            conversation_mode="stateful",
+            previous_interaction=prior,
+        )
+        self.assertTrue(request.interaction_kwargs["store"])
+        self.assertEqual(
+            request.interaction_kwargs["previous_interaction_id"],
+            "interaction-1",
+        )
+
+        nonstored = dict(prior, stored=False)
+        with self.assertRaisesRegex(ValueError, "store=false"):
+            gemini_service_module.prepare_gemini_request(
+                provider_id="aistudio",
+                prompt="edit it",
+                model="gemini-3.1-flash-image",
+                seed=1,
+                conversation_mode="stateful",
+                previous_interaction=nonstored,
+            )
+        with self.assertRaisesRegex(ValueError, "model_id mismatch"):
+            gemini_service_module.prepare_gemini_request(
+                provider_id="aistudio",
+                prompt="edit it",
+                model="gemini-3-pro-image",
+                seed=1,
+                conversation_mode="stateful",
+                previous_interaction=prior,
+            )
+
+    def test_model_specific_ratios_reference_limits_and_video(self):
+        flash = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="prompt",
+            model={
+                "model": "gemini-3.1-flash-image",
+                "aspect_ratio": "1:8",
+                "resolution": "512",
+                "search_mode": "off",
+                "thinking_level": "MINIMAL",
+                "include_thoughts": False,
+                "output_mime_type": "image/png",
+                "prominent_people": "allow",
+            },
+            seed=1,
+            video=b"video-bytes",
+        )
+        self.assertEqual(flash.api_mode, "interactions")
+        self.assertTrue(
+            any(block.get("type") == "video" for block in flash.interaction_kwargs["input"])
+        )
+
+        with self.assertRaisesRegex(ValueError, "Invalid value for aspect_ratio"):
+            gemini_service_module.prepare_gemini_request(
+                provider_id="aistudio",
+                prompt="prompt",
+                model={
+                    "model": "gemini-3.1-flash-lite-image",
+                    "aspect_ratio": "1:8",
+                },
+                seed=1,
+            )
+        with self.assertRaisesRegex(ValueError, "at most 3"):
+            gemini_service_module.prepare_gemini_request(
+                provider_id="aistudio",
+                prompt="prompt",
+                model="gemini-2.5-flash-image",
+                seed=1,
+                reference_pack=self._reference_pack(4),
+            )
+        with self.assertRaisesRegex(ValueError, "does not support video"):
+            gemini_service_module.prepare_gemini_request(
+                provider_id="aistudio",
+                prompt="prompt",
+                model="gemini-3.1-flash-lite-image",
+                seed=1,
+                video=b"video-bytes",
+            )
+
+    def test_role_aware_reference_and_file_blocks_are_built(self):
+        request = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="prompt",
+            model="gemini-3.1-flash-image",
+            seed=1,
+            reference_pack=self._reference_pack(1, role="character"),
+            input_files={
+                "kind": gemini_service_module.GEMINI_INPUT_FILES_PIPE_KIND,
+                "version": gemini_service_module.GEMINI_INPUT_FILES_PIPE_VERSION,
+                "items": [
+                    {
+                        "data": b"context",
+                        "mime_type": "text/plain",
+                        "name": "context.txt",
+                    }
+                ],
+            },
+        )
+        blocks = request.interaction_kwargs["input"]
+        self.assertTrue(
+            any(
+                block.get("type") == "text"
+                and "character reference" in block.get("text", "")
+                for block in blocks
+            )
+        )
+        self.assertTrue(any(block.get("type") == "document" for block in blocks))
+
+    def test_image_search_requires_attribution_renderer(self):
+        model = {
+            "model": "gemini-3.1-flash-image",
+            "aspect_ratio": "1:1",
+            "resolution": "1K",
+            "search_mode": "image",
+            "thinking_level": "MINIMAL",
+            "include_thoughts": False,
+            "output_mime_type": "image/png",
+            "prominent_people": "allow",
+        }
+        with self.assertRaisesRegex(ValueError, "attribution renderer"):
+            gemini_service_module.prepare_gemini_request(
+                provider_id="aistudio",
+                prompt="prompt",
+                model=model,
+                seed=1,
+            )
+        request = gemini_service_module.prepare_gemini_request(
+            provider_id="aistudio",
+            prompt="prompt",
+            model=model,
+            seed=1,
+            grounding_renderer=gemini_service_module.GROUNDING_RENDERER_VERSION,
+        )
+        self.assertEqual(
+            request.interaction_kwargs["tools"][0]["search_types"],
+            ["image_search"],
+        )
+
+    def test_interactions_parser_preserves_order_and_thought_final_duplicates(self):
+        image_bytes = self._png_bytes()
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        interaction = pytypes.SimpleNamespace(
+            id="interaction-2",
+            usage={"total_tokens": 12},
+            output_text="",
+            output_image=None,
+            steps=[
+                pytypes.SimpleNamespace(
+                    type="thought",
+                    summary=[
+                        pytypes.SimpleNamespace(
+                            type="image",
+                            data=encoded,
+                            mime_type="image/png",
+                        )
+                    ],
+                ),
+                pytypes.SimpleNamespace(
+                    type="model_output",
+                    error=None,
+                    content=[
+                        pytypes.SimpleNamespace(
+                            type="text",
+                            text="Final answer",
+                            annotations=[
+                                {
+                                    "title": "Source",
+                                    "url": "https://example.com",
+                                }
+                            ],
+                        ),
+                        pytypes.SimpleNamespace(
+                            type="image",
+                            data=encoded,
+                            mime_type="image/png",
+                        ),
+                    ],
+                ),
+                pytypes.SimpleNamespace(
+                    type="google_search_call",
+                    id="call-1",
+                    search_type="image_search",
+                    arguments={"queries": ["example"]},
+                ),
+                pytypes.SimpleNamespace(
+                    type="google_search_result",
+                    result=[
+                        pytypes.SimpleNamespace(
+                            search_suggestions="<div>Suggestions</div>"
+                        )
+                    ],
+                ),
+            ],
+        )
+        parsed = gemini_service_module.parse_interaction_response(interaction)
+        self.assertEqual(parsed.response_text, "Final answer")
+        self.assertEqual(parsed.interaction_id, "interaction-2")
+        self.assertEqual(len(parsed.image_artifacts), 2)
+        self.assertTrue(parsed.image_artifacts[0].is_thought)
+        self.assertFalse(parsed.image_artifacts[1].is_thought)
+        self.assertEqual(
+            [block["type"] for block in parsed.content_pipe["blocks"][:3]],
+            ["image", "text", "image"],
+        )
+        metadata = json.loads(parsed.grounding_metadata_json)
+        self.assertEqual(metadata["search_calls"][0]["search_type"], "image_search")
+        self.assertEqual(
+            metadata["search_suggestions_html"],
+            ["<div>Suggestions</div>"],
+        )
+
+    def test_generate_content_parser_keeps_mixed_sizes_and_skips_malformed_parts(self):
+        response = pytypes.SimpleNamespace(
+            candidates=[
+                pytypes.SimpleNamespace(
+                    content=pytypes.SimpleNamespace(
+                        parts=[
+                            pytypes.SimpleNamespace(
+                                inline_data=pytypes.SimpleNamespace(
+                                    data=self._png_bytes(2, 2),
+                                    mime_type="image/png",
+                                ),
+                                thought=False,
+                                text=None,
+                            ),
+                            pytypes.SimpleNamespace(
+                                inline_data=pytypes.SimpleNamespace(
+                                    data=self._png_bytes(3, 2),
+                                    mime_type="image/png",
+                                ),
+                                thought=False,
+                                text=None,
+                            ),
+                            pytypes.SimpleNamespace(
+                                inline_data=pytypes.SimpleNamespace(
+                                    data=b"not-an-image",
+                                    mime_type="image/png",
+                                ),
+                                thought=False,
+                                text="Visible text",
+                            ),
+                        ]
+                    ),
+                    grounding_metadata=None,
+                    finish_reason="STOP",
+                    safety_ratings=None,
+                )
+            ],
+            prompt_feedback=None,
+            usage_metadata={"total_token_count": 5},
+        )
+        parsed = gemini_service_module.parse_generate_content_response(response)
+        self.assertEqual(len(parsed.image_artifacts), 2)
+        self.assertEqual(tuple(parsed.image_batch.shape), (1, 2, 2, 3))
+        self.assertIn("differently sized final image", parsed.system_messages)
+        self.assertIn("Malformed GenerateContent image part", parsed.system_messages)
+        self.assertEqual(parsed.response_text, "Visible text")
+
+    def test_generate_content_grounding_has_normalized_sources_and_citations(self):
+        grounding_metadata = pytypes.SimpleNamespace(
+            web_search_queries=["query"],
+            image_search_steps=[{"query": "image query"}],
+            search_entry_point=pytypes.SimpleNamespace(
+                rendered_content="<div>Search suggestions</div>"
+            ),
+            grounding_chunks=[
+                pytypes.SimpleNamespace(
+                    web=pytypes.SimpleNamespace(
+                        title="Example",
+                        uri="https://example.com",
+                    )
+                )
+            ],
+            grounding_supports=[
+                pytypes.SimpleNamespace(
+                    segment=pytypes.SimpleNamespace(
+                        text="Supported statement",
+                        start_index=0,
+                        end_index=19,
+                    ),
+                    grounding_chunk_indices=[0],
+                    confidence_scores=[0.9],
+                )
+            ],
+        )
+        response = pytypes.SimpleNamespace(
+            candidates=[
+                pytypes.SimpleNamespace(
+                    content=pytypes.SimpleNamespace(parts=[]),
+                    grounding_metadata=grounding_metadata,
+                    finish_reason="STOP",
+                    safety_ratings=None,
+                )
+            ],
+            prompt_feedback=None,
+            usage_metadata={"total_token_count": 1},
+        )
+        parsed = gemini_service_module.parse_generate_content_response(response)
+        metadata = json.loads(parsed.grounding_metadata_json)
+        self.assertEqual(metadata["queries"], ["query"])
+        self.assertEqual(metadata["sources"][0]["url"], "https://example.com")
+        self.assertEqual(
+            metadata["citations"][0]["sources"][0]["title"],
+            "Example",
+        )
+        self.assertEqual(
+            metadata["search_suggestions_html"],
+            ["<div>Search suggestions</div>"],
+        )
+
+    def test_helper_nodes_are_registered_and_model_report_does_not_expose_key(self):
+        self.assertTrue(hasattr(nodes_module, "BurveGeminiReferencePack"))
+        self.assertTrue(hasattr(nodes_module, "BurveGeminiInputFiles"))
+        self.assertTrue(hasattr(nodes_module, "BurveListGoogleImageModels"))
+
+        fake_models = pytypes.SimpleNamespace(
+            list=lambda: [
+                pytypes.SimpleNamespace(
+                    name="models/gemini-3.1-flash-image",
+                    base_model_id="gemini-3.1-flash-image",
+                )
+            ]
+        )
+        fake_client = pytypes.SimpleNamespace(models=fake_models)
+        with mock.patch.dict(
+            os.environ,
+            {"GEMINI_API_KEY": "super-secret-key"},
+            clear=False,
+        ):
+            with mock.patch.object(
+                nodes_module.genai,
+                "Client",
+                return_value=fake_client,
+            ):
+                report, = nodes_module.BurveListGoogleImageModels().list_models()
+        self.assertNotIn("super-secret-key", report)
+        self.assertTrue(
+            json.loads(report)["plugin_catalog"][0].get("model_id")
+        )
+
+    def test_saved_preview_workflow_fixture_normalizes_without_socket_reordering(self):
+        fixture_path = os.path.join(
+            REPO_DIR,
+            "tests",
+            "fixtures",
+            "gemini_preview_workflows.json",
+        )
+        with open(fixture_path, "r", encoding="utf-8") as handle:
+            fixture = json.load(handle)
+        self.assertEqual(
+            fixture["legacy_output_order"],
+            [
+                "image",
+                "thinking_image",
+                "thinking_process",
+                "system_messages",
+                "generated_image_pipe",
+            ],
+        )
+        normalized = [
+            gemini_service_module.normalize_model_selection(node["model"]).model_id
+            for node in fixture["nodes"]
+        ]
+        self.assertEqual(
+            normalized,
+            ["gemini-3.1-flash-image", "gemini-3-pro-image"],
+        )
 
 
 class NodeRegistrationTests(unittest.TestCase):
