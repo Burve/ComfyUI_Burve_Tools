@@ -15,6 +15,7 @@ if LIVE_ENABLED:
     from google import genai
 
     from gemini_image_service import (
+        DEFAULT_GEMINI_IMAGE_MODEL,
         GEMINI_IMAGE_MODEL_SPECS,
         GROUNDING_RENDERER_VERSION,
         build_interaction_pipe,
@@ -78,10 +79,20 @@ class GeminiImageLiveSmokeTests(unittest.TestCase):
 
     def test_model_discovery_and_one_low_resolution_generation_per_supported_pair(self):
         for provider, base_client, configured_location in self._providers():
-            for model_id in GEMINI_IMAGE_MODEL_SPECS:
+            for model_id, spec in GEMINI_IMAGE_MODEL_SPECS.items():
                 with self.subTest(provider=provider, model=model_id):
                     model = model_id
-                    if model_id == "gemini-3.1-flash-image":
+                    if model_id == "gemini-nano-banana-2.1":
+                        model = {
+                            "model": model_id,
+                            "aspect_ratio": "1:1",
+                            "resolution": "1K",
+                            "search_mode": "off",
+                            "thinking_level": "MINIMAL",
+                            "include_thoughts": False,
+                            "output_mime_type": "default",
+                        }
+                    elif model_id == "gemini-3.1-flash-image":
                         model = {
                             "model": model_id,
                             "aspect_ratio": "1:1",
@@ -100,7 +111,7 @@ class GeminiImageLiveSmokeTests(unittest.TestCase):
                         response_mode="image_only",
                         configured_location=configured_location,
                     )
-                    if provider == "vertex" and model_id.startswith("gemini-3"):
+                    if provider == "vertex" and spec.vertex_global_only:
                         self.assertEqual(request.effective_location, "global")
                     client = self._client_for_request(provider, base_client, request)
                     try:
@@ -110,7 +121,7 @@ class GeminiImageLiveSmokeTests(unittest.TestCase):
                         self._skip_if_account_restricted(error)
                     self.assertGreater(len(parsed.image_artifacts), 0)
 
-    def test_flash_video_image_search_pro_interleaving_and_stateful_edit(self):
+    def test_nano_banana_video_image_search_pro_interleaving_and_stateful_edit(self):
         video_path = os.getenv("BURVE_GEMINI_LIVE_VIDEO", "").strip()
         api_key = os.getenv("GEMINI_API_KEY", "").strip()
         if not api_key:
@@ -121,7 +132,7 @@ class GeminiImageLiveSmokeTests(unittest.TestCase):
             request = prepare_gemini_request(
                 provider_id="aistudio",
                 prompt="Create one representative still from this video.",
-                model="gemini-3.1-flash-image",
+                model={"model": DEFAULT_GEMINI_IMAGE_MODEL, "resolution": "1K", "thinking_level": "MINIMAL"},
                 seed=19,
                 video=video_path,
                 response_mode="image_only",
@@ -132,14 +143,13 @@ class GeminiImageLiveSmokeTests(unittest.TestCase):
                 self._skip_if_account_restricted(error)
 
         search_model = {
-            "model": "gemini-3.1-flash-image",
+            "model": DEFAULT_GEMINI_IMAGE_MODEL,
             "aspect_ratio": "1:1",
-            "resolution": "512",
+            "resolution": "1K",
             "search_mode": "image",
             "thinking_level": "MINIMAL",
             "include_thoughts": False,
-            "output_mime_type": "image/png",
-            "prominent_people": "allow",
+            "output_mime_type": "default",
         }
         search_request = prepare_gemini_request(
             provider_id="aistudio",
@@ -170,7 +180,7 @@ class GeminiImageLiveSmokeTests(unittest.TestCase):
         first_request = prepare_gemini_request(
             provider_id="aistudio",
             prompt="Generate a red square on a white background.",
-            model="gemini-3.1-flash-image",
+            model={"model": DEFAULT_GEMINI_IMAGE_MODEL, "resolution": "1K", "thinking_level": "MINIMAL"},
             seed=31,
             conversation_mode="stateful",
         )
@@ -186,7 +196,7 @@ class GeminiImageLiveSmokeTests(unittest.TestCase):
             second_request = prepare_gemini_request(
                 provider_id="aistudio",
                 prompt="Change the square to green.",
-                model="gemini-3.1-flash-image",
+                model={"model": DEFAULT_GEMINI_IMAGE_MODEL, "resolution": "1K", "thinking_level": "MINIMAL"},
                 seed=31,
                 conversation_mode="stateful",
                 previous_interaction=pipe,

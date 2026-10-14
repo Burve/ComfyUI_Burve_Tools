@@ -2494,6 +2494,30 @@ class BurveV3ExtensionTests(unittest.TestCase):
         self.assertIn("image/webp", flash31_fields["output_mime_type"].options)
         self.assertIn("block", flash31_fields["prominent_people"].options)
 
+    def test_nano_banana_schema_defaults_and_ratios_are_provider_specific(self):
+        node_map = self._get_node_map()
+        for node_id, vertex in (("BurveGoogleImageGen", False), ("BurveVertexImageGen", True)):
+            with self.subTest(node=node_id):
+                schema = node_map[node_id].define_schema()
+                model_input = next(item for item in schema.inputs if item.id == "model")
+                self.assertEqual(model_input.options[0].key, "gemini-nano-banana-2.1")
+                fields = {item.id: item for item in model_input.options[0].inputs}
+                self.assertEqual(list(fields), [
+                    "aspect_ratio", "resolution", "search_mode", "thinking_level",
+                    "include_thoughts", "output_mime_type",
+                ])
+                self.assertEqual(list(fields["resolution"].options), ["1K", "2K", "4K"])
+                self.assertEqual(fields["resolution"].kwargs["default"], "1K")
+                self.assertEqual(list(fields["thinking_level"].options), ["MINIMAL", "MEDIUM", "HIGH"])
+                self.assertEqual(fields["thinking_level"].kwargs["default"], "MEDIUM")
+                self.assertEqual(fields["search_mode"].kwargs["default"], "off")
+                self.assertFalse(fields["include_thoughts"].kwargs["default"])
+                self.assertEqual(list(fields["output_mime_type"].options), ["default", "image/jpeg"])
+                self.assertEqual(fields["output_mime_type"].kwargs["default"], "default")
+                self.assertEqual("9:21" in fields["aspect_ratio"].options, vertex)
+                legacy_inputs = nodes_module.BurveVertexImageGen.INPUT_TYPES() if vertex else nodes_module.BurveGoogleImageGen.INPUT_TYPES()
+                self.assertEqual(legacy_inputs["required"]["model"][0][0], "gemini-nano-banana-2.1")
+
     def test_non_gemini_wrappers_preserve_node_ids(self):
         node_map = self._get_node_map()
 
@@ -3278,11 +3302,12 @@ class GeminiImageModernizationTests(unittest.TestCase):
     def test_current_catalog_default_and_retired_aliases(self):
         self.assertEqual(
             gemini_service_module.DEFAULT_GEMINI_IMAGE_MODEL,
-            "gemini-3.1-flash-image",
+            "gemini-nano-banana-2.1",
         )
         self.assertEqual(
             list(gemini_service_module.GEMINI_IMAGE_MODEL_SPECS),
             [
+                "gemini-nano-banana-2.1",
                 "gemini-3.1-flash-image",
                 "gemini-3-pro-image",
                 "gemini-3.1-flash-lite-image",
@@ -3298,6 +3323,20 @@ class GeminiImageModernizationTests(unittest.TestCase):
         self.assertEqual(flash.model_id, "gemini-3.1-flash-image")
         self.assertEqual(pro.model_id, "gemini-3-pro-image")
         self.assertIn("Model migration", flash.messages[0])
+
+        flash_spec = gemini_service_module.get_model_spec("gemini-3.1-flash-image")
+        self.assertEqual(flash_spec.lifecycle_status, "deprecated")
+        self.assertIsNone(flash_spec.retirement_date)
+        flash_messages = " ".join(flash.messages).lower()
+        self.assertIn("deprecated", flash_messages)
+        self.assertIn("no shutdown date", flash_messages)
+        self.assertIn("gemini-nano-banana-2.1", flash_messages)
+        legacy_spec = gemini_service_module.get_model_spec("gemini-2.5-flash-image")
+        self.assertEqual(legacy_spec.lifecycle_status, "legacy")
+        self.assertEqual(legacy_spec.retirement_date, "2027-03-15")
+        legacy = gemini_service_module.normalize_model_selection("gemini-2.5-flash-image")
+        self.assertEqual(legacy.model_id, "gemini-2.5-flash-image")
+        self.assertIn("2027-03-15", " ".join(legacy.messages))
 
     def test_auto_api_routing_and_default_storage(self):
         flash = gemini_service_module.prepare_gemini_request(
@@ -3741,7 +3780,8 @@ class GeminiImageModernizationTests(unittest.TestCase):
                 pytypes.SimpleNamespace(
                     name="models/gemini-3.1-flash-image",
                     base_model_id="gemini-3.1-flash-image",
-                )
+                ),
+                pytypes.SimpleNamespace(name="models/gemini-nano-banana-2.1"),
             ]
         )
         fake_client = pytypes.SimpleNamespace(models=fake_models)
@@ -3760,6 +3800,12 @@ class GeminiImageModernizationTests(unittest.TestCase):
         self.assertTrue(
             json.loads(report)["plugin_catalog"][0].get("model_id")
         )
+        parsed_report = json.loads(report)
+        self.assertIn("gemini-nano-banana-2.1", parsed_report["discovered_image_models"])
+        catalog = {entry["model_id"]: entry for entry in parsed_report["plugin_catalog"]}
+        self.assertEqual(set(catalog), set(gemini_service_module.GEMINI_IMAGE_MODEL_SPECS))
+        self.assertTrue(catalog["gemini-nano-banana-2.1"]["available_in_discovery"])
+        self.assertEqual(catalog["gemini-2.5-flash-image"]["retirement_date"], "2027-03-15")
 
     def test_saved_preview_workflow_fixture_normalizes_without_socket_reordering(self):
         fixture_path = os.path.join(
@@ -3788,6 +3834,227 @@ class GeminiImageModernizationTests(unittest.TestCase):
             normalized,
             ["gemini-3.1-flash-image", "gemini-3-pro-image"],
         )
+
+
+class NanoBanana21Tests(unittest.TestCase):
+    MODEL = "gemini-nano-banana-2.1"
+
+    def _request(self, **overrides):
+        kwargs = {
+            "provider_id": "aistudio", "prompt": "Generate an image.",
+            "model": self.MODEL, "seed": 123,
+        }
+        kwargs.update(overrides)
+        return gemini_service_module.prepare_gemini_request(**kwargs)
+
+    def test_defaults_route_to_interactions_and_vertex_generate_content(self):
+        request = self._request()
+        self.assertEqual(request.api_mode, "interactions")
+        self.assertEqual(request.model_id, self.MODEL)
+        self.assertFalse(request.interaction_kwargs["store"])
+        output = request.interaction_kwargs["response_format"][1]
+        self.assertEqual(output, {"type": "image", "aspect_ratio": "1:1", "image_size": "1K"})
+        generation = request.interaction_kwargs["generation_config"]
+        self.assertEqual(generation["thinking_level"], "medium")
+        self.assertEqual(generation["thinking_summaries"], "none")
+        self.assertNotIn("tools", request.interaction_kwargs)
+
+        vertex = self._request(provider_id="vertex", configured_location="europe-west4")
+        self.assertEqual(vertex.api_mode, "generate_content")
+        self.assertEqual(vertex.effective_location, "global")
+        self.assertEqual(vertex.config.image_config.aspect_ratio, "1:1")
+        self.assertEqual(vertex.config.image_config.image_size, "1K")
+        self.assertEqual(vertex.config.thinking_config.thinking_level, "MEDIUM")
+        self.assertFalse(vertex.config.thinking_config.include_thoughts)
+        self.assertNotIn("output_mime_type", vars(vertex.config.image_config))
+
+    def test_provider_api_modes_and_configured_vertex_location(self):
+        self.assertEqual(
+            set(gemini_service_module.get_supported_api_modes(self.MODEL, "aistudio")),
+            {"generate_content", "interactions"},
+        )
+        self.assertEqual(
+            tuple(gemini_service_module.get_supported_api_modes(self.MODEL, "vertex")),
+            ("generate_content",),
+        )
+        self.assertEqual(self._request(api_mode="generate_content").api_mode, "generate_content")
+        with self.assertRaisesRegex(ValueError, "unconfirmed"):
+            self._request(provider_id="vertex", api_mode="interactions")
+        with self.assertRaisesRegex(ValueError, "Stateful|stateful"):
+            self._request(provider_id="vertex", conversation_mode="stateful")
+        with self.assertRaisesRegex(ValueError, "global-only"):
+            self._request(provider_id="vertex", configured_location="europe-west4", vertex_location_mode="configured")
+        configured = self._request(provider_id="vertex", configured_location="global", vertex_location_mode="configured")
+        self.assertEqual(configured.effective_location, "global")
+
+    def test_vertex_discovery_reports_provider_specific_api_modes(self):
+        fake_client = pytypes.SimpleNamespace(models=pytypes.SimpleNamespace(
+            list=lambda: [pytypes.SimpleNamespace(name=f"publishers/google/models/{self.MODEL}")],
+        ))
+        with mock.patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "test-project", "GOOGLE_CLOUD_LOCATION": "us-central1"}):
+            with mock.patch.object(nodes_module.genai, "Client", return_value=fake_client) as client:
+                report, = nodes_module.BurveListGoogleImageModels().list_models(provider="vertex")
+        self.assertEqual(client.call_args.kwargs["location"], "global")
+        report = json.loads(report)
+        self.assertEqual(report["discovered_image_models"], [self.MODEL])
+        entry = next(item for item in report["plugin_catalog"] if item["model_id"] == self.MODEL)
+        self.assertTrue(entry["available_in_discovery"])
+        self.assertEqual(entry["api_modes"], ["generate_content"])
+
+    def test_sampling_is_omitted_on_vertex_without_changing_other_contracts(self):
+        for seed, temperature, top_p in ((0, 0.0, 0.0), (2**64 - 1, 2.0, 1.0)):
+            with self.subTest(seed=seed):
+                vertex = self._request(provider_id="vertex", seed=seed, temperature=temperature, top_p=top_p)
+                for field in ("seed", "temperature", "top_p"):
+                    self.assertNotIn(field, vars(vertex.config))
+                    self.assertIn(field, " ".join(vertex.preflight_messages))
+                for model in (self.MODEL, "gemini-3.1-flash-image"):
+                    for api_mode in ("generate_content", "interactions"):
+                        request = self._request(model=model, api_mode=api_mode, seed=seed, temperature=temperature, top_p=top_p)
+                        generation = vars(request.config) if request.config is not None else request.interaction_kwargs["generation_config"]
+                        self.assertEqual(generation["seed"], seed % 2147483647)
+                        self.assertEqual(generation["temperature"], temperature)
+                        self.assertEqual(generation["top_p"], top_p)
+                old_vertex = self._request(provider_id="vertex", model="gemini-3.1-flash-image", seed=seed)
+                self.assertEqual(old_vertex.config.seed, seed % 2147483647)
+
+    def test_sampling_bounds_are_still_validated(self):
+        for name, value in (("temperature", -0.01), ("temperature", 2.01), ("top_p", -0.01), ("top_p", 1.01)):
+            with self.subTest(field=name, value=value):
+                with self.assertRaisesRegex(ValueError, name):
+                    self._request(**{name: value})
+
+    def test_medium_and_other_thinking_levels_reach_both_apis(self):
+        for level in ("MINIMAL", "MEDIUM", "HIGH"):
+            for provider, api_mode in (("aistudio", "interactions"), ("aistudio", "generate_content"), ("vertex", "generate_content")):
+                with self.subTest(level=level, provider=provider, api=api_mode):
+                    request = self._request(provider_id=provider, api_mode=api_mode, model={
+                        "model": self.MODEL, "thinking_level": level, "include_thoughts": True,
+                    })
+                    if request.config is None:
+                        generation = request.interaction_kwargs["generation_config"]
+                        self.assertEqual(generation["thinking_level"], level.lower())
+                        self.assertEqual(generation["thinking_summaries"], "auto")
+                    else:
+                        self.assertEqual(request.config.thinking_config.thinking_level, level)
+                        self.assertTrue(request.config.thinking_config.include_thoughts)
+        with self.assertRaisesRegex(ValueError, "thinking_level"):
+            self._request(model={"model": self.MODEL, "thinking_level": "LOW"})
+
+    def test_resolutions_and_provider_specific_aspect_ratio_validation(self):
+        for resolution in ("1K", "2K", "4K"):
+            request = self._request(provider_id="vertex", model={
+                "model": self.MODEL, "resolution": resolution, "aspect_ratio": "9:21",
+            })
+            self.assertEqual(request.config.image_config.image_size, resolution)
+            self.assertEqual(request.config.image_config.aspect_ratio, "9:21")
+        for provider in ("aistudio", "vertex"):
+            with self.assertRaisesRegex(ValueError, "resolution"):
+                self._request(provider_id=provider, model={"model": self.MODEL, "resolution": "512"})
+        with self.assertRaisesRegex(ValueError, "aspect_ratio"):
+            self._request(model={"model": self.MODEL, "aspect_ratio": "9:21"})
+        with self.assertRaises(gemini_service_module.GeminiAspectRatioCompatibilityError):
+            self._request(aspect_ratio_override="9:21")
+        vertex = self._request(provider_id="vertex", aspect_ratio_override="9:21")
+        self.assertEqual(vertex.config.image_config.aspect_ratio, "9:21")
+        common_ratio = self._request(aspect_ratio_override="1:8")
+        self.assertEqual(common_ratio.interaction_kwargs["response_format"][1]["aspect_ratio"], "1:8")
+
+    def test_vertex_output_formats_and_precedence(self):
+        for mime in ("image/png", "image/jpeg"):
+            for quality in (0, 100):
+                with self.subTest(mime=mime, quality=quality):
+                    request = self._request(provider_id="vertex", vertex_output_mime_type=mime,
+                        output_compression_quality=quality,
+                        model={"model": self.MODEL, "output_mime_type": "image/jpeg"})
+                    self.assertEqual(request.config.image_config.output_mime_type, mime)
+                    if mime == "image/jpeg":
+                        self.assertEqual(request.config.image_config.output_compression_quality, quality)
+                    else:
+                        self.assertNotIn("output_compression_quality", vars(request.config.image_config))
+        fallback = self._request(provider_id="vertex", model={"model": self.MODEL, "output_mime_type": "image/jpeg"})
+        self.assertEqual(fallback.config.image_config.output_mime_type, "image/jpeg")
+        for mime in ("image/webp", "image/heic", "image/heif"):
+            with self.subTest(rejected=mime):
+                with self.assertRaisesRegex(ValueError, "output type"):
+                    self._request(provider_id="vertex", vertex_output_mime_type=mime)
+        for quality in (-1, 101):
+            with self.assertRaisesRegex(ValueError, "compression_quality"):
+                self._request(provider_id="vertex", output_compression_quality=quality)
+
+    def test_aistudio_jpeg_is_only_sent_for_interactions(self):
+        model = {"model": self.MODEL, "output_mime_type": "image/jpeg"}
+        interaction = self._request(model=model, response_mode="image_only")
+        self.assertEqual(interaction.interaction_kwargs["response_format"]["mime_type"], "image/jpeg")
+        generated = self._request(model=model, api_mode="generate_content", response_mode="image_only")
+        self.assertEqual(generated.config.response_modalities, ["IMAGE"])
+        self.assertNotIn("output_mime_type", vars(generated.config.image_config))
+        self.assertIn("output_mime_type", " ".join(generated.preflight_messages))
+        with self.assertRaisesRegex(ValueError, "output_mime_type"):
+            self._request(model={"model": self.MODEL, "output_mime_type": "image/webp"})
+
+    def test_search_tools_reach_each_supported_api(self):
+        expected_types = {"web": ["web_search"], "image": ["image_search"], "web+image": ["web_search", "image_search"]}
+        for mode, expected in expected_types.items():
+            for provider, api_mode in (("aistudio", "interactions"), ("aistudio", "generate_content"), ("vertex", "generate_content")):
+                with self.subTest(mode=mode, provider=provider, api=api_mode):
+                    request = self._request(provider_id=provider, api_mode=api_mode,
+                        model={"model": self.MODEL, "search_mode": mode},
+                        grounding_renderer=gemini_service_module.GROUNDING_RENDERER_VERSION)
+                    if request.config is None:
+                        self.assertEqual(request.interaction_kwargs["tools"][0]["search_types"], expected)
+                    else:
+                        actual = vars(request.config.tools[0].google_search.search_types)
+                        self.assertEqual(set(actual), set(expected))
+        for mode in ("image", "web+image"):
+            with self.assertRaisesRegex(ValueError, "attribution renderer"):
+                self._request(model={"model": self.MODEL, "search_mode": mode})
+
+    def test_documents_and_video_reach_both_apis(self):
+        documents = {
+            "kind": gemini_service_module.GEMINI_INPUT_FILES_PIPE_KIND,
+            "version": gemini_service_module.GEMINI_INPUT_FILES_PIPE_VERSION,
+            "items": [{"data": b"context", "mime_type": "text/plain", "name": "context.txt"}],
+        }
+        for provider, api_mode in (("aistudio", "interactions"), ("aistudio", "generate_content"), ("vertex", "generate_content")):
+            with self.subTest(provider=provider, api=api_mode):
+                request = self._request(provider_id=provider, api_mode=api_mode, input_files=documents, video=b"video-bytes")
+                if request.config is None:
+                    blocks = request.interaction_kwargs["input"]
+                    self.assertTrue(any(item.get("type") == "document" and item["mime_type"] == "text/plain" for item in blocks))
+                    self.assertTrue(any(item.get("type") == "video" and item["mime_type"] == "video/mp4" for item in blocks))
+                else:
+                    mimes = [getattr(part, "mime_type", None) for part in request.contents]
+                    self.assertIn("text/plain", mimes)
+                    self.assertIn("video/mp4", mimes)
+
+    def test_reference_role_limits_accept_boundaries_and_reject_excess(self):
+        with mock.patch.object(gemini_service_module, "_tensor_to_png_bytes", return_value=(b"image", "image/png")):
+            for role, limit in (("generic", 14), ("object", 10), ("character", 4), ("style", 0)):
+                with self.subTest(role=role):
+                    if limit:
+                        request = self._request(reference_pack=GeminiImageModernizationTests._reference_pack(limit, role))
+                        image_count = sum(item.get("type") == "image" for item in request.interaction_kwargs["input"])
+                        self.assertEqual(image_count, limit)
+                    with self.assertRaises(ValueError):
+                        self._request(reference_pack=GeminiImageModernizationTests._reference_pack(limit + 1, role))
+
+    def test_stateful_edits_keep_model_and_provider_identity(self):
+        previous = gemini_service_module.build_interaction_pipe(
+            provider_id="aistudio", model_id=self.MODEL, api_mode="interactions",
+            interaction_id="nano-edit-1", stored=True,
+        )
+        request = self._request(conversation_mode="stateful", previous_interaction=previous)
+        self.assertTrue(request.interaction_kwargs["store"])
+        self.assertEqual(request.interaction_kwargs["previous_interaction_id"], "nano-edit-1")
+        with self.assertRaisesRegex(ValueError, "model_id mismatch"):
+            self._request(conversation_mode="stateful", previous_interaction=dict(previous, model_id="gemini-3.1-flash-image"))
+        with self.assertRaisesRegex(ValueError, "provider_id mismatch"):
+            self._request(conversation_mode="stateful", previous_interaction=dict(previous, provider_id="vertex"))
+        with self.assertRaisesRegex(ValueError, "store=false"):
+            self._request(conversation_mode="stateful", previous_interaction=dict(previous, stored=False))
+        with self.assertRaisesRegex(ValueError, "stateless"):
+            self._request(previous_interaction=previous)
 
 
 class NodeRegistrationTests(unittest.TestCase):

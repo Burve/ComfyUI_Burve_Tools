@@ -6,7 +6,7 @@ import importlib.metadata
 import io
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -27,7 +27,7 @@ except ImportError:
 
 
 MIN_GOOGLE_GENAI_VERSION = "2.13.0"
-DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
+DEFAULT_GEMINI_IMAGE_MODEL = "gemini-nano-banana-2.1"
 THINKING_PROCESS_DEFAULT = "No thinking output returned by the model."
 SYSTEM_MESSAGES_DEFAULT = "No system messages."
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
@@ -128,6 +128,9 @@ class GeminiImageModelSpec:
     thinking_levels: tuple[str, ...]
     output_mime_types: MappingProxyType
     documentation_url: str
+    provider_api_modes: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
+    provider_aspect_ratios: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
+    provider_sampling_parameters: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True)
@@ -201,11 +204,43 @@ def _mime_types(**providers: tuple[str, ...]) -> MappingProxyType:
 
 GEMINI_IMAGE_MODEL_SPECS = MappingProxyType(
     {
+        "gemini-nano-banana-2.1": GeminiImageModelSpec(
+            model_id="gemini-nano-banana-2.1",
+            display_name="Gemini Nano Banana 2.1",
+            aliases=(),
+            lifecycle_status="stable",
+            retirement_date=None,
+            fields=(
+                _combo_field("aspect_ratio", "1:1", FLASH_31_ASPECT_RATIOS),
+                _combo_field("resolution", "1K", ("1K", "2K", "4K")),
+                _combo_field("search_mode", "off", ("off", "web", "image", "web+image")),
+                _combo_field("thinking_level", "MEDIUM", ("MINIMAL", "MEDIUM", "HIGH")),
+                _bool_field("include_thoughts", False),
+                _combo_field("output_mime_type", "default", ("default", "image/jpeg")),
+            ),
+            providers=("aistudio", "vertex"),
+            api_modes=("generate_content", "interactions"),
+            vertex_global_only=True,
+            input_modalities=("text", "image", "video", "document"),
+            response_modes=("text_and_image", "image_only"),
+            max_reference_images=14,
+            reference_role_limits=_role_limits(object=10, character=4, style=0, generic=14),
+            search_modes=("off", "web", "image", "web+image"),
+            thinking_levels=("MINIMAL", "MEDIUM", "HIGH"),
+            output_mime_types=_mime_types(
+                aistudio=("image/png", "image/jpeg"),
+                vertex=("image/png", "image/jpeg"),
+            ),
+            documentation_url="https://ai.google.dev/gemini-api/docs/models/gemini-nano-banana-2.1",
+            provider_api_modes=MappingProxyType({"vertex": ("generate_content",)}),
+            provider_aspect_ratios=MappingProxyType({"vertex": FLASH_31_ASPECT_RATIOS + ("9:21",)}),
+            provider_sampling_parameters=MappingProxyType({"vertex": ()}),
+        ),
         "gemini-3.1-flash-image": GeminiImageModelSpec(
             model_id="gemini-3.1-flash-image",
             display_name="Gemini 3.1 Flash Image",
             aliases=("gemini-3.1-flash-image-preview",),
-            lifecycle_status="stable",
+            lifecycle_status="deprecated",
             retirement_date=None,
             fields=(
                 _combo_field("aspect_ratio", "1:1", FLASH_31_ASPECT_RATIOS),
@@ -299,7 +334,7 @@ GEMINI_IMAGE_MODEL_SPECS = MappingProxyType(
             display_name="Gemini 2.5 Flash Image (legacy)",
             aliases=(),
             lifecycle_status="legacy",
-            retirement_date="2026-10-02",
+            retirement_date="2027-03-15",
             fields=(
                 _combo_field("aspect_ratio", "1:1", STANDARD_ASPECT_RATIOS),
             ),
@@ -401,11 +436,41 @@ def get_field_default(model_id: str, field_key: str) -> Any:
     raise KeyError(field_key)
 
 
-def build_dynamic_combo_options(io_module) -> list[Any]:
+def get_model_fields(
+    model_id: str, provider_id: str = "aistudio",
+) -> tuple[GeminiImageFieldSpec, ...]:
+    spec = get_model_spec(model_id)
+    if provider_id not in spec.providers:
+        raise ValueError(f"{model_id} does not support Google provider '{provider_id}'.")
+    ratios = spec.provider_aspect_ratios.get(provider_id)
+    if ratios is None:
+        return spec.fields
+    return tuple(
+        replace(model_field, options=ratios) if model_field.key == "aspect_ratio" else model_field
+        for model_field in spec.fields
+    )
+
+
+def get_supported_api_modes(model_id: str, provider_id: str) -> tuple[str, ...]:
+    spec = get_model_spec(model_id)
+    if provider_id not in spec.providers:
+        raise ValueError(f"{model_id} does not support Google provider '{provider_id}'.")
+    return spec.provider_api_modes.get(provider_id, spec.api_modes)
+
+
+def get_supported_sampling_parameters(model_id: str, provider_id: str) -> tuple[str, ...]:
+    return get_model_spec(model_id).provider_sampling_parameters.get(
+        provider_id, ("seed", "temperature", "top_p"),
+    )
+
+
+def build_dynamic_combo_options(io_module, provider_id: str = "aistudio") -> list[Any]:
     options = []
     for model_id, spec in GEMINI_IMAGE_MODEL_SPECS.items():
+        if provider_id not in spec.providers:
+            continue
         inputs = []
-        for field in spec.fields:
+        for field in get_model_fields(model_id, provider_id):
             if field.field_type == "combo":
                 inputs.append(
                     io_module.Combo.Input(
@@ -422,7 +487,7 @@ def build_dynamic_combo_options(io_module) -> list[Any]:
     return options
 
 
-def normalize_model_selection(model: Any) -> NormalizedModelSelection:
+def normalize_model_selection(model: Any, provider_id: str = "aistudio") -> NormalizedModelSelection:
     if isinstance(model, str):
         requested_model_id = model.strip()
         provided_values = {}
@@ -437,6 +502,7 @@ def normalize_model_selection(model: Any) -> NormalizedModelSelection:
 
     model_id = GEMINI_IMAGE_MODEL_ALIASES.get(requested_model_id, requested_model_id)
     spec = get_model_spec(model_id)
+    fields = get_model_fields(model_id, provider_id)
     messages: list[str] = []
     if model_id != requested_model_id:
         messages.append(
@@ -448,8 +514,14 @@ def normalize_model_selection(model: Any) -> NormalizedModelSelection:
             f"Lifecycle warning: {model_id} is legacy and is scheduled to retire on "
             f"{spec.retirement_date}. It is not automatically replaced."
         )
+    if spec.lifecycle_status == "deprecated":
+        messages.append(
+            f"Lifecycle warning: {model_id} is deprecated; no shutdown date is announced. "
+            f"Use {DEFAULT_GEMINI_IMAGE_MODEL} for new workflows. "
+            "Your saved model selection is not automatically replaced."
+        )
 
-    allowed_keys = {field.key for field in spec.fields}
+    allowed_keys = {field.key for field in fields}
     unexpected_keys = sorted(set(provided_values) - allowed_keys)
     if unexpected_keys:
         raise ValueError(
@@ -457,7 +529,7 @@ def normalize_model_selection(model: Any) -> NormalizedModelSelection:
         )
 
     normalized_values: dict[str, Any] = {}
-    for field in spec.fields:
+    for field in fields:
         value = provided_values.get(field.key, field.default)
         if field.field_type == "combo":
             if not isinstance(value, str):
@@ -482,8 +554,9 @@ def normalize_model_selection(model: Any) -> NormalizedModelSelection:
 def resolve_model_selection_with_aspect_ratio_override(
     model: Any,
     aspect_ratio_override: Any = "",
+    provider_id: str = "aistudio",
 ) -> NormalizedModelSelection:
-    selection = normalize_model_selection(model)
+    selection = normalize_model_selection(model, provider_id)
     if aspect_ratio_override is None:
         return selection
     if not isinstance(aspect_ratio_override, str):
@@ -493,8 +566,8 @@ def resolve_model_selection_with_aspect_ratio_override(
     if not normalized_override:
         return selection
 
-    spec = get_model_spec(selection.model_id)
-    aspect_ratio_field = next((field for field in spec.fields if field.key == "aspect_ratio"), None)
+    fields = get_model_fields(selection.model_id, provider_id)
+    aspect_ratio_field = next((field for field in fields if field.key == "aspect_ratio"), None)
     if aspect_ratio_field is None:
         raise GeminiAspectRatioCompatibilityError(
             f"Selected model {selection.model_id} does not support aspect_ratio "
@@ -531,20 +604,25 @@ def resolve_api_mode(
     if conversation_mode not in {"stateless", "stateful"}:
         raise ValueError("conversation_mode must be stateless or stateful.")
 
-    spec = get_model_spec(model_id)
+    supported_api_modes = get_supported_api_modes(model_id, provider_id)
     if requested_api_mode == "auto":
         api_mode = (
             "interactions"
-            if provider_id == "aistudio" and "interactions" in spec.api_modes
+            if provider_id == "aistudio" and "interactions" in supported_api_modes
             else "generate_content"
         )
     else:
         api_mode = requested_api_mode
 
-    if api_mode not in spec.api_modes:
+    if api_mode not in supported_api_modes:
+        explanation = (
+            " Interactions support for this model on Vertex is unconfirmed."
+            if provider_id == "vertex" and api_mode == "interactions"
+            else ""
+        )
         raise ValueError(
-            f"{model_id} does not currently support api_mode '{api_mode}'. "
-            f"Supported API modes: {', '.join(spec.api_modes)}."
+            f"{model_id} does not currently support api_mode '{api_mode}' on {provider_id}. "
+            f"Supported API modes: {', '.join(supported_api_modes)}.{explanation}"
         )
     if conversation_mode == "stateful" and api_mode != "interactions":
         raise ValueError("Stateful conversation mode requires the Interactions API.")
@@ -605,6 +683,7 @@ def prepare_gemini_request(
     selection = resolve_model_selection_with_aspect_ratio_override(
         model,
         aspect_ratio_override=aspect_ratio_override,
+        provider_id=provider_id,
     )
     spec = get_model_spec(selection.model_id)
     preflight_messages = list(selection.messages)
@@ -636,10 +715,21 @@ def prepare_gemini_request(
         raise ValueError(
             f"{selection.model_id} does not support response_mode '{response_mode}'."
         )
-    if not isinstance(temperature, (int, float)) or not 0.0 <= float(temperature) <= 2.0:
+    sampling_parameters = get_supported_sampling_parameters(selection.model_id, provider_id)
+    if "temperature" in sampling_parameters and (
+        not isinstance(temperature, (int, float)) or not 0.0 <= float(temperature) <= 2.0
+    ):
         raise ValueError("temperature must be between 0.0 and 2.0.")
-    if not isinstance(top_p, (int, float)) or not 0.0 <= float(top_p) <= 1.0:
+    if "top_p" in sampling_parameters and (
+        not isinstance(top_p, (int, float)) or not 0.0 <= float(top_p) <= 1.0
+    ):
         raise ValueError("top_p must be between 0.0 and 1.0.")
+    ignored_sampling = [key for key in ("seed", "temperature", "top_p") if key not in sampling_parameters]
+    if ignored_sampling:
+        preflight_messages.append(
+            f"{selection.model_id} on {provider_id} does not support "
+            f"{', '.join(ignored_sampling)}; these controls are ignored and omitted from the request."
+        )
 
     search_mode = str(selection.values.get("search_mode", "off"))
     if search_mode not in spec.search_modes:
@@ -663,7 +753,7 @@ def prepare_gemini_request(
     if video_input is not None and "video" not in spec.input_modalities:
         raise ValueError(
             f"{selection.model_id} does not support video-to-image input. "
-            "Use gemini-3.1-flash-image."
+            f"Use {DEFAULT_GEMINI_IMAGE_MODEL}."
         )
 
     previous_interaction_id = _normalize_previous_interaction(
@@ -708,8 +798,8 @@ def prepare_gemini_request(
             seed=seed,
             system_instructions=system_instructions,
             response_mode=response_mode,
-            temperature=float(temperature),
-            top_p=float(top_p),
+            temperature=float(temperature) if "temperature" in sampling_parameters else None,
+            top_p=float(top_p) if "top_p" in sampling_parameters else None,
             vertex_output_mime_type=vertex_output_mime_type,
             output_compression_quality=output_compression_quality,
             person_generation=person_generation,
@@ -738,8 +828,8 @@ def prepare_gemini_request(
             response_mode=response_mode,
             conversation_mode=conversation_mode,
             previous_interaction_id=previous_interaction_id,
-            temperature=float(temperature),
-            top_p=float(top_p),
+            temperature=float(temperature) if "temperature" in sampling_parameters else None,
+            top_p=float(top_p) if "top_p" in sampling_parameters else None,
             vertex_output_mime_type=vertex_output_mime_type,
         )
 
@@ -1148,6 +1238,20 @@ def ensure_default_text(value: str, default: str) -> str:
     return value if value else default
 
 
+def _build_sampling_config(
+    *, provider_id: str, model_id: str, seed: int, temperature: float | None, top_p: float | None,
+) -> dict[str, Any]:
+    supported = get_supported_sampling_parameters(model_id, provider_id)
+    config = {}
+    if "seed" in supported and seed is not None:
+        config["seed"] = seed % 2147483647
+    if "temperature" in supported and temperature is not None:
+        config["temperature"] = temperature
+    if "top_p" in supported and top_p is not None:
+        config["top_p"] = top_p
+    return config
+
+
 def _build_generate_content_config(
     *,
     provider_id: str,
@@ -1155,8 +1259,8 @@ def _build_generate_content_config(
     seed: int,
     system_instructions: str,
     response_mode: str,
-    temperature: float,
-    top_p: float,
+    temperature: float | None,
+    top_p: float | None,
     vertex_output_mime_type: str,
     output_compression_quality: int,
     person_generation: str,
@@ -1179,6 +1283,10 @@ def _build_generate_content_config(
             else legacy_mime
         )
         if selected_mime:
+            if selected_mime not in get_model_spec(selection.model_id).output_mime_types["vertex"]:
+                raise ValueError(
+                    f"{selection.model_id} does not support Vertex output type {selected_mime}."
+                )
             image_config_kwargs["output_mime_type"] = selected_mime
             if selected_mime == "image/jpeg":
                 image_config_kwargs["output_compression_quality"] = output_compression_quality
@@ -1221,10 +1329,11 @@ def _build_generate_content_config(
         else ["TEXT", "IMAGE"],
         "image_config": types.ImageConfig(**image_config_kwargs),
         "system_instruction": system_instructions or None,
-        "seed": seed % 2147483647 if seed is not None else None,
-        "temperature": temperature,
-        "top_p": top_p,
     }
+    config_kwargs.update(_build_sampling_config(
+        provider_id=provider_id, model_id=selection.model_id,
+        seed=seed, temperature=temperature, top_p=top_p,
+    ))
     tools = _build_generate_content_tools(selection)
     if tools:
         config_kwargs["tools"] = tools
@@ -1247,8 +1356,8 @@ def _build_interaction_kwargs(
     response_mode: str,
     conversation_mode: str,
     previous_interaction_id: str,
-    temperature: float,
-    top_p: float,
+    temperature: float | None,
+    top_p: float | None,
     vertex_output_mime_type: str,
 ) -> dict[str, Any]:
     input_blocks: list[dict[str, Any]] = []
@@ -1303,11 +1412,10 @@ def _build_interaction_kwargs(
     if response_mode == "text_and_image":
         response_format = [{"type": "text"}, image_format]
 
-    generation_config: dict[str, Any] = {
-        "seed": seed % 2147483647 if seed is not None else None,
-        "temperature": temperature,
-        "top_p": top_p,
-    }
+    generation_config = _build_sampling_config(
+        provider_id=provider_id, model_id=selection.model_id,
+        seed=seed, temperature=temperature, top_p=top_p,
+    )
     thinking_level = selection.values.get("thinking_level")
     if thinking_level:
         generation_config["thinking_level"] = str(thinking_level).lower()
@@ -1583,9 +1691,7 @@ def _build_generate_content_tools(selection: NormalizedModelSelection) -> list[A
     search_mode = selection.values.get("search_mode")
     if search_mode in {None, "off"}:
         return None
-    if selection.model_id == "gemini-3-pro-image":
-        return [types.Tool(google_search=types.GoogleSearch())]
-    if selection.model_id == "gemini-3.1-flash-image":
+    if "image" in get_model_spec(selection.model_id).search_modes:
         search_type_kwargs: dict[str, Any] = {}
         if search_mode in {"web", "web+image"}:
             search_type_kwargs["web_search"] = types.WebSearch()
@@ -1598,7 +1704,7 @@ def _build_generate_content_tools(selection: NormalizedModelSelection) -> list[A
                 )
             )
         ]
-    return None
+    return [types.Tool(google_search=types.GoogleSearch())]
 
 
 def _build_interaction_tools(selection: NormalizedModelSelection) -> list[dict[str, Any]] | None:
