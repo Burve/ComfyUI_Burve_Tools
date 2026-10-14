@@ -4,18 +4,19 @@ A collection of custom nodes for ComfyUI, focusing on integration with Google's 
 
 ## Nodes
 
-### Gemini Image 3.0 release overview
+### Gemini Image — Nano Banana 2.1 update
 
-Version 3.0 moves both Google image-generation nodes from retired preview selections to Google's stable Gemini image endpoints, adds GenerateContent and Interactions workflows, and keeps saved workflows compatible. The model data below was re-verified against Google's public documentation on **August 25, 2026**.
+Both Google image-generation nodes now support **Nano Banana 2.1** (`gemini-nano-banana-2.1`), the default for newly created nodes. Existing model selections and saved workflows remain compatible. The catalog below describes the plugin's supported features, with the Nano Banana 2.1 update verified against Google's public documentation on **October 13, 2026**. See the [release notes](release_notes/2026-10-nano-banana-2.1.md) for the provider-specific details.
 
 | Model ID | Lifecycle | Output sizes | Search / thinking / video | Reference limits | Vertex location |
 | --- | --- | --- | --- | --- | --- |
-| `gemini-3.1-flash-image` | Stable; new default | `512`, `1K`, `2K`, `4K` | Web + image search; `MINIMAL`/`HIGH` thinking; video-to-image | 14 total; up to 10 object and 4 character | `global` |
+| `gemini-nano-banana-2.1` | Stable; new-node default | `1K`, `2K`, `4K` | Web + image search; `MINIMAL`/`MEDIUM`/`HIGH` thinking, default `MEDIUM`; video-to-image | 14 total; up to 10 object and 4 character | `global` |
+| `gemini-3.1-flash-image` | Deprecated; no shutdown date announced | `512`, `1K`, `2K`, `4K` | Web + image search; `MINIMAL`/`HIGH` thinking; video-to-image | 14 total; up to 10 object and 4 character | `global` |
 | `gemini-3-pro-image` | Stable | `1K`, `2K`, `4K` | Web search; implicit model-managed thinking; interleaved text/image | 14 total; up to 6 object, 5 character, and 3 style | `global` |
 | `gemini-3.1-flash-lite-image` | Stable | `1K` | `MINIMAL`/`HIGH` thinking; no search or video | 14 object/generic | `global` |
-| `gemini-2.5-flash-image` | Legacy; retirement **October 2, 2026** | `1K` | No search, thinking, video, or Interactions | 3 total | Configured region |
+| `gemini-2.5-flash-image` | Legacy; Vertex retirement **March 15, 2027** | `1K` | No search, thinking, video, or Interactions | 3 total | Configured region |
 
-Saved `gemini-3.1-flash-image-preview` and `gemini-3-pro-image-preview` selections are normalized to their stable IDs before validation and SDK calls. The migration is reported in `system_messages`; Gemini 2.5 is never silently replaced. The standard ratio set is `1:1`, `3:2`, `2:3`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, and `21:9`; Gemini 3.1 Flash Image additionally supports `1:4`, `1:8`, `4:1`, and `8:1`.
+Saved `gemini-3.1-flash-image-preview` and `gemini-3-pro-image-preview` selections are normalized to their stable IDs before validation and SDK calls. The migration is reported in `system_messages`; existing selections are never silently upgraded to 2.1. The standard ratio set is `1:1`, `3:2`, `2:3`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, and `21:9`; Nano Banana 2.1 and Gemini 3.1 Flash Image additionally support `1:4`, `1:8`, `4:1`, and `8:1`. Nano Banana 2.1 also supports `9:21` on Vertex; AI Studio rejects that ratio before sending a request.
 
 ### 1. Burve Google Image Gen
 
@@ -29,7 +30,7 @@ These inputs are present on both Google image nodes:
 | --- | --- | --- |
 | `prompt` | `STRING` | Image-generation or editing request. Ignored when `character_pipe` is connected. |
 | `model` | DynamicCombo | Selects the model and exposes only that model's supported fields. |
-| `seed` | `INT` | Generation seed with ComfyUI's after-generate control. |
+| `seed` | `INT` | Generation seed with ComfyUI's after-generate control. Nano Banana 2.1 on Vertex omits it from the API request and reports that it is ignored. |
 | `system_instructions` | `STRING`, optional | Higher-level model instructions. Ignored when `character_pipe` is connected. |
 | `reference_images` | `IMAGE_LIST`, optional | Legacy unlabelled image references, normally created by **Burve Image Reference Pack**. |
 | `character_pipe` | `CHARACTER_GEN_PIPE`, optional | One-cable prompt, instructions, references, and planner metadata from **Burve Character Planner**. It overrides direct prompt/instruction/reference inputs. |
@@ -42,10 +43,10 @@ These inputs are present on both Google image nodes:
 | `previous_interaction` | `GEMINI_INTERACTION_PIPE`, optional | Resumes a stored Interaction from the same provider, model, and API mode. |
 | `reference_pack` | `GEMINI_REFERENCE_PIPE`, optional | Role-labelled `generic`, `object`, `character`, or `style` references. |
 | `input_files` | `GEMINI_INPUT_FILES_PIPE`, optional | Validated PDF, TXT, Markdown, or CSV context. Documents are unsupported by Gemini 2.5 Image. |
-| `video` | `VIDEO`, optional | Native ComfyUI video context; Gemini 3.1 Flash Image only. |
-| `video_url` | `STRING`, optional | Public HTTPS YouTube URL; Gemini 3.1 Flash Image only. Connecting both video inputs is rejected. |
-| `temperature` | `FLOAT`, `0.0..2.0`, default `1.0` | Controls sampling variability. |
-| `top_p` | `FLOAT`, `0.0..1.0`, default `0.95` | Controls nucleus sampling. |
+| `video` | `VIDEO`, optional | Native ComfyUI video context; Nano Banana 2.1 or Gemini 3.1 Flash Image. |
+| `video_url` | `STRING`, optional | Public HTTPS YouTube URL; Nano Banana 2.1 or Gemini 3.1 Flash Image. Connecting both video inputs is rejected. |
+| `temperature` | `FLOAT`, `0.0..2.0`, default `1.0` | Controls sampling variability; omitted with a diagnostic for Nano Banana 2.1 on Vertex. |
+| `top_p` | `FLOAT`, `0.0..1.0`, default `0.95` | Controls nucleus sampling; omitted with a diagnostic for Nano Banana 2.1 on Vertex. |
 | `grounding_renderer` | `STRING`, advanced/internal | Frontend-managed Image Search attribution version. Do not connect or edit manually. |
 
 Reference precedence is **Character Generation Pipe → Gemini Reference Pack → legacy IMAGE_LIST**. If more than one source is connected, the winning source is used and a warning is added to `system_messages`.
@@ -54,19 +55,24 @@ Reference precedence is **Character Generation Pipe → Gemini Reference Pack �
 
 | Model | Nested fields |
 | --- | --- |
+| `gemini-nano-banana-2.1` | `aspect_ratio`, `resolution`, `search_mode`, `thinking_level`, `include_thoughts`, `output_mime_type` |
 | `gemini-3.1-flash-image` | `aspect_ratio`, `resolution`, `search_mode`, `thinking_level`, `include_thoughts`, `output_mime_type`, `prominent_people` |
 | `gemini-3-pro-image` | `aspect_ratio`, `resolution`, `search_mode`, `output_mime_type` |
 | `gemini-3.1-flash-lite-image` | `aspect_ratio`, fixed `resolution=1K`, `thinking_level`, `include_thoughts` |
 | `gemini-2.5-flash-image` | `aspect_ratio` |
 
-`search_mode` supports `off`/`web` on Pro and `off`/`web`/`image`/`web+image` on 3.1 Flash. Image Search is accepted only when the bundled attribution renderer is active. `thinking_level` is `MINIMAL` or `HIGH`; `include_thoughts` requests available thought summaries/content. The nested MIME and prominent-people fields are retained for model/workflow compatibility; on Vertex, explicit top-level Vertex controls take precedence.
+`search_mode` supports `off`/`web` on Pro and `off`/`web`/`image`/`web+image` on Nano Banana 2.1 and 3.1 Flash. Image Search is accepted only when the bundled attribution renderer is active. Nano Banana 2.1 has `MINIMAL`, `MEDIUM`, and `HIGH` thinking, defaulting to `MEDIUM`; 3.1 Flash and Flash Lite retain `MINIMAL`/`HIGH`. `include_thoughts` requests available thought summaries/content.
+
+Nano Banana 2.1 defaults to `resolution=1K` and does not accept `512`. Its nested `output_mime_type` offers `default` or `image/jpeg`; explicit JPEG is supported by AI Studio Interactions, while AI Studio GenerateContent ignores this nested format override with a diagnostic. On Vertex, the top-level format control takes precedence. The older models retain their existing nested MIME and prominent-people fields for workflow compatibility; 2.1 adds no nested prominent-people field.
 
 #### API routing and storage
 
-| Provider | Flash 3.1 / Pro in `auto` | Flash Lite / 2.5 in `auto` | Explicit Interactions |
-| --- | --- | --- | --- |
-| AI Studio | Interactions | GenerateContent | Flash 3.1 and Pro |
-| Vertex AI | GenerateContent | GenerateContent | Experimental; Flash 3.1 and Pro |
+| Provider | Nano Banana 2.1 in `auto` | Flash 3.1 / Pro in `auto` | Flash Lite / 2.5 in `auto` | Explicit Interactions |
+| --- | --- | --- | --- | --- |
+| AI Studio | Interactions | Interactions | GenerateContent | Nano Banana 2.1, Flash 3.1, and Pro |
+| Vertex AI | GenerateContent | GenerateContent | GenerateContent | Experimental; Flash 3.1 and Pro only |
+
+Nano Banana 2.1 supports explicit GenerateContent on both providers. Vertex 2.1 rejects Interactions and stateful continuation locally; AI Studio 2.1 supports stored Interactions and continuation with the existing interaction pipe.
 
 Stateless Interactions explicitly send `store=false`. Selecting `stateful` sends `store=true` and creates a resumable pipe; only a stored pipe can be connected to `previous_interaction`. GenerateContent retains bounded retries and reports the attempt/API/retry reason. Interactions use one attempt because an ambiguous transport failure may already have created the stored request.
 
@@ -78,13 +84,15 @@ The Vertex node has all shared inputs above plus these Vertex-specific controls:
 
 | Input | Values | Purpose and behavior |
 | --- | --- | --- |
-| `vertex_location_mode` | `auto`, `configured` | `auto` routes stable Gemini 3.x image models to `global`; strict configured mode rejects a non-global 3.x call. |
-| `vertex_output_mime_type` | `default`, PNG, JPEG, WebP, HEIC, HEIF | Selects the response format where the chosen model supports it. Gemini 2.5 does not support HEIC/HEIF. |
+| `vertex_location_mode` | `auto`, `configured` | `auto` routes Nano Banana 2.1 and Gemini 3.x image models to `global`; strict configured mode rejects a non-global call for these models. |
+| `vertex_output_mime_type` | `default`, PNG, JPEG, WebP, HEIC, HEIF | Selects the response format where the chosen model supports it. Nano Banana 2.1 accepts only `default`, PNG, or JPEG; Gemini 2.5 does not support HEIC/HEIF. Unsupported choices fail locally. |
 | `output_compression_quality` | `INT`, `0..100`, default `90` | JPEG quality for Vertex GenerateContent; ignored for non-JPEG formats and Interactions. |
 | `person_generation` | `default`, `ALLOW_ALL`, `ALLOW_ADULT`, `ALLOW_NONE` | Vertex GenerateContent person-generation policy. |
 | `prominent_people` | `default`, `allow`, `block` | Vertex GenerateContent prominent/public-person policy. `ALLOW_NONE` person generation takes precedence. |
 
 The node authenticates with `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, and Google credentials / ADC. It never reads `GEMINI_API_KEY`. Explicit Vertex Interactions remains experimental; `auto` uses GenerateContent.
+
+Nano Banana 2.1 on Vertex does not support sampling parameters. The plugin retains the shared `seed`, `temperature`, and `top_p` widgets for workflow compatibility, omits those values from Vertex 2.1 requests, and explains this in `system_messages`. AI Studio sampling behavior and all older-model behavior remain unchanged. Vertex 2.1 supports the existing person-generation and prominent-people controls and JPEG compression quality. The broader image-input MIME support is separate from selectable output formats.
 
 #### Gemini outputs and pipes
 
@@ -130,7 +138,7 @@ Performs read-only model discovery for an account/provider/location and compares
 
 ### 3.0 migration and privacy
 
-No workflow edit is required for retired preview names. For example, `{"model": "gemini-3.1-flash-image-preview", "resolution": "1K"}` is normalized to `gemini-3.1-flash-image`, with a migration notice in `system_messages`. Retired preview selections keep their old GenerateContent routing for stateless `auto` execution while calling the stable endpoint. Existing selections are otherwise unchanged; only newly created nodes default to Gemini 3.1 Flash Image.
+No workflow edit is required for retired preview names. For example, `{"model": "gemini-3.1-flash-image-preview", "resolution": "1K"}` is normalized to `gemini-3.1-flash-image`, with a migration notice in `system_messages`. Retired preview selections keep their old GenerateContent routing for stateless `auto` execution while calling the stable endpoint. Existing selections are otherwise unchanged; only newly created nodes default to Nano Banana 2.1. The node IDs, input names/order, and all nine output positions remain unchanged.
 
 The plugin does not write API keys, prompts, uploaded document/video/image content, or interaction contents to logs. Server-side retention is opt-in through `conversation_mode=stateful`; stateless Interactions explicitly send `store=false`.
 
@@ -662,12 +670,12 @@ Important:
 **Symptom:** The image node stays active for a long time and appears stuck
 
 *   Cause: The Gemini request is slow, retrying transient failures, or not returning within the configured timeout budget.
-*   Fix: Inspect `system_messages` after the node finishes. For `gemini-3.1-flash-image`, try `global`, lower `resolution`, `MINIMAL` `thinking_level`, or a higher advanced `request_timeout_seconds`.
+*   Fix: Inspect `system_messages` after the node finishes. For `gemini-nano-banana-2.1` or `gemini-3.1-flash-image`, try `global`, lower `resolution`, `MINIMAL` `thinking_level`, or a higher advanced `request_timeout_seconds`.
 *   The node now uses a bounded timeout and returns an explicit timeout or retry-exhaustion error instead of waiting indefinitely.
 
-**Symptom:** `gemini-3.1-flash-image` is slow
+**Symptom:** Nano Banana 2.1 or `gemini-3.1-flash-image` is slow
 
-*   Cause: This model supports Thinking and uses the `global` Vertex location. Higher resolution and higher thinking levels can increase latency.
+*   Cause: These models support Thinking and use the `global` Vertex location. Higher resolution and higher thinking levels can increase latency; Nano Banana 2.1 defaults to `MEDIUM` thinking.
 *   Fix: Start with `global`, `1K` or `2K`, and `MINIMAL` thinking when you need a more responsive workflow.
 
 ### What this node actually uses
@@ -684,12 +692,18 @@ That means:
 *   `Burve Google Image Gen (Vertex AI)` does **not** use `GEMINI_API_KEY`.
 *   Vertex auth is Google credentials / ADC plus project and location.
 *   `GOOGLE_GENAI_USE_VERTEXAI` is optional for the SDK in general, but not required by this node's current implementation.
-*   Stable Gemini 3.x image models are global-only on Vertex AI as of August 25, 2026.
+*   Nano Banana 2.1 and the catalog's Gemini 3.x image models use the `global` Vertex endpoint.
 
 Official references:
 
 *   [Gemini image generation guide](https://ai.google.dev/gemini-api/docs/image-generation)
+*   [Nano Banana 2.1 model](https://ai.google.dev/gemini-api/docs/models/gemini-nano-banana-2.1)
+*   [Nano Banana 2.1 on Google Cloud](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/nano-banana-2-1)
+*   [Gemini GenerateContent image guide](https://ai.google.dev/gemini-api/docs/generate-content/image-generation)
+*   [Interactions response formats](https://ai.google.dev/api/interactions-api#ImageResponseFormat)
 *   [Gemini model deprecations](https://ai.google.dev/gemini-api/docs/deprecations)
+*   [October 6, 2026 release notes](https://ai.google.dev/gemini-api/docs/changelog#october-6-2026)
+*   [Gemini 2.5 Flash Image lifecycle on Google Cloud](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/2-5-flash-image)
 *   [Interactions API overview](https://ai.google.dev/gemini-api/docs/interactions-overview)
 *   [Google Gen AI Python SDK overview](https://googleapis.github.io/python-genai/)
 *   [google-genai on PyPI](https://pypi.org/project/google-genai/)

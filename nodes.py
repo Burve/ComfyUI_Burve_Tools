@@ -33,6 +33,7 @@ try:
         DEFAULT_REQUEST_TIMEOUT_SECONDS,
         DEFAULT_RETRY_ATTEMPTS,
         DEFAULT_GEMINI_IMAGE_MODEL,
+        GEMINI_IMAGE_MODEL_SPECS,
         GEMINI_CONTENT_PIPE_KIND,
         GEMINI_CONTENT_PIPE_VERSION,
         GEMINI_INPUT_FILES_PIPE_KIND,
@@ -53,6 +54,7 @@ try:
         ensure_default_text,
         GeminiAspectRatioCompatibilityError,
         get_model_spec,
+        get_supported_api_modes,
         normalize_model_selection,
         parse_generate_content_response,
         parse_interaction_response,
@@ -68,6 +70,7 @@ except ImportError:
         DEFAULT_REQUEST_TIMEOUT_SECONDS,
         DEFAULT_RETRY_ATTEMPTS,
         DEFAULT_GEMINI_IMAGE_MODEL,
+        GEMINI_IMAGE_MODEL_SPECS,
         GEMINI_CONTENT_PIPE_KIND,
         GEMINI_CONTENT_PIPE_VERSION,
         GEMINI_INPUT_FILES_PIPE_KIND,
@@ -88,6 +91,7 @@ except ImportError:
         ensure_default_text,
         GeminiAspectRatioCompatibilityError,
         get_model_spec,
+        get_supported_api_modes,
         normalize_model_selection,
         parse_generate_content_response,
         parse_interaction_response,
@@ -198,15 +202,13 @@ class BurveGoogleImageGenBase:
             "required": {
                 "prompt": ("STRING", {"multiline": True, "default": ""}),
                 "model": (
-                    [
-                        "gemini-3.1-flash-image",
-                        "gemini-3-pro-image",
-                        "gemini-3.1-flash-lite-image",
-                        "gemini-2.5-flash-image",
-                    ],
+                    list(GEMINI_IMAGE_MODEL_SPECS),
                     {"default": DEFAULT_GEMINI_IMAGE_MODEL},
                 ),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "seed": ("INT", {
+                    "default": 0, "min": 0, "max": 0xffffffffffffffff,
+                    "tooltip": "Ignored by Nano Banana 2.1 on Vertex; changing it can still trigger a new ComfyUI execution.",
+                }),
             },
             "optional": {
                 "system_instructions": ("STRING", {"multiline": True, "default": ""}),
@@ -250,11 +252,13 @@ class BurveGoogleImageGenBase:
                 "video_url": ("STRING", {"default": "", "multiline": False}),
                 "temperature": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "advanced": True},
+                    {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05, "advanced": True,
+                     "tooltip": "Sampling temperature. Ignored by Nano Banana 2.1 on Vertex."},
                 ),
                 "top_p": (
                     "FLOAT",
-                    {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01, "advanced": True},
+                    {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01, "advanced": True,
+                     "tooltip": "Sampling probability. Ignored by Nano Banana 2.1 on Vertex."},
                 ),
                 "grounding_renderer": (
                     "STRING",
@@ -887,7 +891,7 @@ class BurveGoogleImageGenBase:
             )
 
         model_id = request.model_id if request is not None else ""
-        if model_id == "gemini-3.1-flash-image":
+        if model_id and "MINIMAL" in get_model_spec(model_id).thinking_levels:
             message += (
                 "\nTry global location, lower resolution, MINIMAL thinking, or a "
                 "higher advanced timeout."
@@ -896,7 +900,7 @@ class BurveGoogleImageGenBase:
 
     def _resolve_model_id_for_error(self, model):
         try:
-            return normalize_model_selection(model).model_id
+            return normalize_model_selection(model, self.PROVIDER_ID).model_id
         except Exception:
             if isinstance(model, dict):
                 model_id = model.get("model")
@@ -1373,12 +1377,7 @@ class BurveListGoogleImageModels:
                 name = str(getattr(item, "name", "") or "")
                 base_model_id = str(getattr(item, "base_model_id", "") or "")
                 model_id = base_model_id or name.rsplit("/", 1)[-1]
-                if "image" in model_id.lower() or model_id in {
-                    "gemini-3.1-flash-image",
-                    "gemini-3-pro-image",
-                    "gemini-3.1-flash-lite-image",
-                    "gemini-2.5-flash-image",
-                }:
+                if "image" in model_id.lower() or model_id in GEMINI_IMAGE_MODEL_SPECS:
                     discovered.append(model_id)
         except Exception as error:
             return (
@@ -1389,22 +1388,16 @@ class BurveListGoogleImageModels:
             )
 
         catalog = []
-        for model_id, spec in sorted(
-            ((model_id, get_model_spec(model_id)) for model_id in (
-                "gemini-3.1-flash-image",
-                "gemini-3-pro-image",
-                "gemini-3.1-flash-lite-image",
-                "gemini-2.5-flash-image",
-            )),
-            key=lambda item: item[0],
-        ):
+        for model_id, spec in sorted(GEMINI_IMAGE_MODEL_SPECS.items()):
+            if provider not in spec.providers:
+                continue
             catalog.append(
                 {
                     "model_id": model_id,
                     "lifecycle": spec.lifecycle_status,
                     "retirement_date": spec.retirement_date,
                     "available_in_discovery": model_id in discovered,
-                    "api_modes": list(spec.api_modes),
+                    "api_modes": list(get_supported_api_modes(model_id, provider)),
                     "vertex_global_only": spec.vertex_global_only,
                 }
             )

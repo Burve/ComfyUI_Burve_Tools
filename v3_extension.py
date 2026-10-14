@@ -392,7 +392,7 @@ def _gemini_inputs(provider_id):
         IO.String.Input("prompt", multiline=True, default=""),
         IO.DynamicCombo.Input(
             "model",
-            options=build_dynamic_combo_options(IO),
+            options=build_dynamic_combo_options(IO, provider_id),
         ),
         IO.Int.Input(
             "seed",
@@ -400,6 +400,7 @@ def _gemini_inputs(provider_id):
             min=0,
             max=0xFFFFFFFFFFFFFFFF,
             control_after_generate=True,
+            tooltip="Ignored by Nano Banana 2.1 on Vertex; changing it can still trigger a new ComfyUI execution.",
         ),
         IO.String.Input("system_instructions", multiline=True, default="", optional=True),
         IO.Custom("IMAGE_LIST").Input("reference_images", optional=True),
@@ -462,6 +463,7 @@ def _gemini_inputs(provider_id):
             step=0.05,
             optional=True,
             advanced=True,
+            tooltip="Sampling temperature. Ignored by Nano Banana 2.1 on Vertex.",
         ),
         IO.Float.Input(
             "top_p",
@@ -471,6 +473,7 @@ def _gemini_inputs(provider_id):
             step=0.01,
             optional=True,
             advanced=True,
+            tooltip="Sampling probability. Ignored by Nano Banana 2.1 on Vertex.",
         ),
         IO.String.Input(
             "grounding_renderer",
